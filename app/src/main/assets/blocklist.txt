@@ -1,0 +1,171 @@
+# Starter blocklist shipped with the app.
+#
+# This is intentionally small. It exists so filtering works on first launch with
+# no network access. Use "Download blocklists" in the app to replace it with
+# merged public lists (StevenBlack, Peter Lowe, 1Hosts Lite, OISD).
+#
+# Format: one domain per line. Subdomains are covered automatically, so
+# "doubleclick.net" also blocks "ad.doubleclick.net".
+# Lines starting with # are ignored.
+
+# --- Google advertising ---
+doubleclick.net
+googleadservices.com
+googlesyndication.com
+google-analytics.com
+googletagmanager.com
+googletagservices.com
+adservice.google.com
+2mdn.net
+admob.com
+app-measurement.com
+
+# --- Major ad exchanges and networks ---
+adnxs.com
+adsrvr.org
+adsafeprotected.com
+advertising.com
+adtechus.com
+amazon-adsystem.com
+casalemedia.com
+contextweb.com
+criteo.com
+criteo.net
+districtm.io
+emxdgt.com
+gumgum.com
+indexexchange.com
+lijit.com
+media.net
+openx.net
+pubmatic.com
+rubiconproject.com
+sharethrough.com
+sovrn.com
+spotxchange.com
+springserve.com
+teads.tv
+triplelift.com
+undertone.com
+yieldmo.com
+360yield.com
+1rx.io
+bidswitch.net
+adform.net
+smartadserver.com
+zedo.com
+adroll.com
+adtech.de
+
+# --- Mobile ad SDKs ---
+applovin.com
+chartboost.com
+inmobi.com
+ironsrc.com
+liftoff.io
+mintegral.com
+moloco.com
+mopub.com
+pangle.io
+startapp.com
+supersonicads.com
+tapjoy.com
+unityads.unity3d.com
+vungle.com
+adcolony.com
+display.io
+fyber.com
+loopme.com
+
+# --- Native / content recommendation ads ---
+taboola.com
+outbrain.com
+revcontent.com
+mgid.com
+propellerads.com
+popads.net
+popcash.net
+adsterra.com
+exoclick.com
+juicyads.com
+trafficjunky.com
+
+# --- Attribution and mobile analytics ---
+adjust.com
+appsflyer.com
+branch.io
+kochava.com
+singular.net
+tenjin.io
+mixpanel.com
+amplitude.com
+segment.io
+heapanalytics.com
+flurry.com
+crashlytics.com
+app-measurement.com
+
+# --- Session recording and behavioural trackers ---
+hotjar.com
+fullstory.com
+mouseflow.com
+smartlook.com
+crazyegg.com
+optimizely.com
+quantserve.com
+quantcast.com
+scorecardresearch.com
+comscore.com
+imrworldwide.com
+moatads.com
+doubleverify.com
+iasds01.com
+demdex.net
+omtrdc.net
+everesttech.net
+adobedtm.com
+rlcdn.com
+agkn.com
+mathtag.com
+turn.com
+tapad.com
+adsymptotic.com
+bluekai.com
+krxd.net
+
+# --- Ad servers and verification ---
+serving-sys.com
+sizmek.com
+flashtalking.com
+innovid.com
+extremereach.com
+pulsepoint.com
+rhythmone.com
+sonobi.com
+
+# --- Monetised redirect and link-shortener intermediaries ---
+adf.ly
+sh.st
+shorte.st
+bc.vc
+ouo.io
+adfoc.us
+exe.io
+shrink.me
+shrinkearn.com
+linkbucks.com
+clk.sh
+fc.lc
+gplinks.in
+za.gl
+cuty.io
+linkvertise.com
+linkvertise.net
+up-to-down.net
+sub2unlock.com
+boost.ink
+social-unlock.com
+
+# --- Push-notification and popup ad networks ---
+pushnami.com
+pushwoosh.com

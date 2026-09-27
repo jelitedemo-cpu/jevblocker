@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Jev Blocker</string>
+
+    <string name="status_off">Protection off</string>
+    <string name="status_off_detail">Tap the switch to start filtering DNS system-wide.</string>
+    <string name="status_on">Protection on</string>
+    <string name="status_on_detail">Filtering DNS for every browser and app on this device.</string>
+    <string name="status_starting">Starting\u2026</string>
+
+    <string name="toggle_label">Filter DNS</string>
+
+    <string name="stat_queries">Queries</string>
+    <string name="stat_blocked">Blocked</string>
+    <string name="stat_domains">Domains</string>
+
+    <string name="action_update">Download blocklists</string>
+    <string name="action_reload">Reload from disk</string>
+    <string name="action_stop">Stop</string>
+
+    <string name="note_title">Known limits</string>
+    <string name="note_body">This filters DNS only. Turn off Private DNS in system settings and disable Chrome\u2019s secure DNS, or lookups bypass the filter. Ads served from the same domain as the page cannot be blocked here \u2014 that needs the in-browser layer.</string>
+
+    <string name="notif_channel_name">Protection status</string>
+    <string name="notif_channel_desc">Shows a persistent notice while DNS filtering runs.</string>
+    <string name="notif_title">DNS filtering active</string>
+    <string name="notif_text">Blocked %1$d of %2$d lookups</string>
+
+    <string name="err_no_vpn_permission">VPN permission was declined.</string>
+    <string name="err_update_failed">Update failed: %1$s</string>
+    <string name="update_ok">%1$d domains loaded</string>
+    <string name="update_running">Downloading\u2026</string>
+</resources>
