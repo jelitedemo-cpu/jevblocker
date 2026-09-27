@@ -13,7 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -22,6 +22,9 @@ import process from "node:process";
 const args = process.argv.slice(2);
 const headed = args.includes("--headed");
 const keepOpen = args.includes("--keep-open");
+// Chrome reports skipped rules on stderr, but only with logging on. That is the
+// only place the reason is ever stated, so it is worth being able to capture it.
+const captureLog = args.includes("--capture-log");
 const profileArg = args.find((a) => a.startsWith("--profile="));
 const explicitProfile = profileArg
   ? profileArg.slice("--profile=".length).replace(/^"|"$/g, "")
@@ -165,9 +168,6 @@ async function verifyRules(cdp, targetId) {
   }
 
   const report = JSON.parse(result.value);
-  console.log(`rulesets enabled : ${report.enabled.join(", ") || "(none)"}`);
-  console.log(`static rules left: ${report.available}`);
-  console.log("");
 
   let failures = 0;
   for (const row of report.results) {
@@ -253,6 +253,128 @@ async function runEndToEnd(cdp) {
   return failures === 0;
 }
 
+/**
+ * Per-ruleset rule counts, read from the manifest and the files it points at.
+ * The manifest is authoritative: a ruleset not listed there never loads.
+ */
+function expectedSizes() {
+  const manifest = JSON.parse(
+    readFileSync(path.join(EXTENSION_DIR, "manifest.json"), "utf8")
+  );
+  const resources = manifest.declarative_net_request?.rule_resources || [];
+  const out = {};
+  for (const entry of resources) {
+    try {
+      const rules = JSON.parse(
+        readFileSync(path.join(EXTENSION_DIR, entry.path), "utf8")
+      );
+      out[entry.id] = rules.length;
+    } catch (error) {
+      out[entry.id] = `unreadable: ${error.message}`;
+    }
+  }
+  return out;
+}
+
+/**
+ * Measures how many rules Chrome is actually holding for each ruleset, by
+ * disabling one at a time and reading the budget delta.
+ *
+ * This exists because a ruleset can load, report itself enabled, and still have
+ * rules dropped -- which is exactly how the 2KB regexFilter limit hid for a
+ * whole release. Counting is the only way to be sure.
+ */
+const ACCOUNTING_EXPRESSION = `(async () => {
+  const dnr = chrome.declarativeNetRequest;
+  // getAvailableStaticRuleCount() does not necessarily reflect an
+  // updateEnabledRulesets() call immediately. Without this settle, readings are
+  // taken mid-update and rules appear to be missing when they are not.
+  const settle = () => new Promise((r) => setTimeout(r, 80));
+  const enabled = await dnr.getEnabledRulesets();
+
+  await dnr.updateEnabledRulesets({ disableRulesetIds: enabled });
+  await settle();
+  const allOff = await dnr.getAvailableStaticRuleCount();
+
+  const sizes = {};
+  const errors = {};
+  for (const id of enabled) {
+    try {
+      await dnr.updateEnabledRulesets({ enableRulesetIds: [id] });
+      await settle();
+      const withIt = await dnr.getAvailableStaticRuleCount();
+      sizes[id] = allOff - withIt;
+      await dnr.updateEnabledRulesets({ disableRulesetIds: [id] });
+      await settle();
+    } catch (e) {
+      errors[id] = String(e && e.message || e);
+    }
+  }
+
+  // Put everything back the way it was.
+  await dnr.updateEnabledRulesets({ enableRulesetIds: enabled });
+  await settle();
+  const available = await dnr.getAvailableStaticRuleCount();
+
+  return JSON.stringify({ enabled, sizes, errors, available, allOff });
+})()`;
+
+async function verifyAccounting(cdp, targetId, expected) {
+  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+  const { result } = await cdp.send(
+    "Runtime.evaluate",
+    { expression: ACCOUNTING_EXPRESSION, awaitPromise: true, returnByValue: true },
+    sessionId
+  );
+
+  if (!result?.value) {
+    console.log(`\nCould not measure ruleset sizes: ${result?.description || "no value"}`);
+    return false;
+  }
+
+  const report = JSON.parse(result.value);
+  let failures = 0;
+  let total = 0;
+
+  for (const id of report.enabled) {
+    const want = expected[id];
+    const got = report.sizes[id];
+    total += typeof got === "number" ? got : 0;
+
+    if (report.errors[id]) {
+      failures += 1;
+      console.log(`  FAIL ${id.padEnd(18)} ${report.errors[id]}`);
+      continue;
+    }
+    if (want === undefined) {
+      console.log(`  ??   ${id.padEnd(18)} loaded but not declared in the manifest`);
+      continue;
+    }
+    const ok = got === want;
+    if (!ok) failures += 1;
+    console.log(
+      `  ${ok ? "ok  " : "FAIL"} ${id.padEnd(18)} ${String(got).padStart(7)} rules` +
+        (ok ? "" : `   expected ${want}`)
+    );
+  }
+
+  console.log("");
+  console.log(`  total held by Chrome : ${total}`);
+  console.log(`  static rules left    : ${report.available}`);
+
+  const declared = Object.values(expected).reduce(
+    (sum, value) => sum + (typeof value === "number" ? value : 0),
+    0
+  );
+  console.log(`  declared in manifest : ${declared}`);
+  if (total !== declared) {
+    failures += 1;
+    console.log(`  MISMATCH: ${declared - total} rules did not load`);
+  }
+
+  return failures === 0;
+}
+
 async function main() {
   if (!existsSync(EXTENSION_DIR)) {
     throw new Error(`extension folder not found: ${EXTENSION_DIR}`);
@@ -283,12 +405,30 @@ async function main() {
     "about:blank",
   ];
   if (!headed) chromeArgs.unshift("--headless=new");
+  if (captureLog) {
+    chromeArgs.push("--enable-logging=stderr", "--v=1");
+  }
 
   console.log(`chrome    : ${chromePath}`);
   console.log(`extension : ${EXTENSION_DIR}`);
   console.log(`mode      : ${headed ? "headed" : "headless"}\n`);
 
-  const child = spawn(chromePath, chromeArgs, { stdio: "ignore" });
+  const child = spawn(chromePath, chromeArgs, {
+    stdio: captureLog ? ["ignore", "pipe", "pipe"] : "ignore",
+  });
+
+  const logLines = [];
+  if (captureLog) {
+    const collect = (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        if (/declarative_net_request|ruleset|rule with id|skipped|invalid/i.test(line)) {
+          logLines.push(line.trim());
+        }
+      }
+    };
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+  }
   let cdp;
 
   try {
@@ -318,19 +458,32 @@ async function main() {
     }
 
     console.log(`service worker : ${worker.url}`);
-    console.log("\nRule checks (asked of Chrome, not assumed):\n");
 
+    const expected = expectedSizes();
+    console.log("\nRuleset accounting (rules Chrome actually holds):\n");
+    const accountingOk = await verifyAccounting(cdp, worker.targetId, expected);
+
+    console.log("\nRule checks (asked of Chrome, not assumed):\n");
     const rulesOk = await verifyRules(cdp, worker.targetId);
 
     console.log("\nEnd-to-end (real navigation against a local server):\n");
     const e2eOk = await runEndToEnd(cdp);
 
-    const passed = rulesOk && e2eOk;
+    const passed = accountingOk && rulesOk && e2eOk;
     if (!passed) process.exitCode = 1;
+
+    if (captureLog && logLines.length) {
+      console.log("\nChrome log (rule warnings):\n");
+      const unique = [...new Set(logLines)];
+      for (const line of unique.slice(0, 40)) console.log(`  ${line}`);
+      if (unique.length > 40) console.log(`  ... and ${unique.length - 40} more`);
+    } else if (captureLog) {
+      console.log("\nChrome log: no rule warnings captured.");
+    }
 
     console.log(
       passed
-        ? "\nPASS — extension loads, rules match, and blocking works on a real page."
+        ? "\nPASS — rulesets load in full, rules match, and blocking works on a real page."
         : "\nFAIL — something above did not behave as intended."
     );
   } finally {

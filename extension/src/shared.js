@@ -7,6 +7,12 @@ export const DEFAULT_SETTINGS = {
   stripTrackingParams: true,
   cosmeticSelectors: true,
 
+  // The 13,600 generic cosmetic selectors from EasyList apply to *every* site,
+  // which is what makes ads vanish and the layout reflow. It is also the only
+  // part of the extension that can hide something legitimate, so it gets its
+  // own switch, separate from the always-safe domain-scoped selectors.
+  cosmeticGeneric: true,
+
   jevEnabled: false,
   jevApiKey: "",
   jevModel: "jev-latest",

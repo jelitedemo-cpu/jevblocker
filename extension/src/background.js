@@ -5,8 +5,16 @@ import {
   setStats,
   EMPTY_STATS,
 } from "./shared.js";
+import { RULESET_SIZES } from "./ruleset-sizes.js";
 
 const BADGE_FLUSH_MS = 1500;
+
+// The compiled EasyList/EasyPrivacy rulesets, in load order. Chrome guarantees
+// only 30,000 static rules across all installed extensions -- the 330,000 this
+// machine grants is not contractual -- so these are enabled greedily within
+// whatever budget is actually available rather than all-or-nothing.
+const FILTER_RULESETS = Object.keys(RULESET_SIZES);
+const COSMETIC_SCRIPT_ID = "jev-cosmetic-generic";
 
 const pending = { ...EMPTY_STATS };
 let flushTimer = null;
@@ -44,36 +52,180 @@ async function updateBadge(stats) {
 }
 
 /**
+ * Rulesets the user's settings ask for, in priority order. Earlier entries win
+ * when the static-rule budget runs short, so the curated rulesets that cover
+ * the worst offenders come before the long tail of the filter lists.
+ */
+function desiredRulesets(settings) {
+  if (!settings.enabled) return [];
+  const ids = [];
+  // The curated ruleset goes first: ~143 rules covering the worst offenders, so
+  // it survives a tight budget that the 115,000-rule filter lists may not.
+  if (settings.blockAds) ids.push("ads", ...FILTER_RULESETS);
+  if (settings.stripTrackingParams) ids.push("tracking_params");
+  if (settings.blockRedirects) ids.push("redirects");
+  return ids;
+}
+
+let lastRuleReport = { active: 0, skipped: [] };
+
+/**
  * Static rulesets ship enabled in the manifest, so anything the user turns off
  * has to be explicitly disabled here.
+ *
+ * The budget check exists because exceeding it is not graceful: enabling a
+ * ruleset that does not fit fails the whole call. Fitting them explicitly means
+ * the extension degrades to fewer rules instead of to no protection.
  */
 async function applyRulesets(settings) {
-  const enable = [];
-  const disable = [];
+  const desired = desiredRulesets(settings);
+  const desiredSet = new Set(desired);
 
-  const wanted = [
-    ["ads", settings.enabled && settings.blockAds],
-    ["redirects", settings.enabled && settings.blockRedirects],
-    ["tracking_params", settings.enabled && settings.stripTrackingParams],
-  ];
+  let enabledNow;
+  try {
+    enabledNow = await chrome.declarativeNetRequest.getEnabledRulesets();
+  } catch (error) {
+    console.error("[jev] could not read enabled rulesets", error);
+    return;
+  }
 
-  for (const [id, on] of wanted) {
-    (on ? enable : disable).push(id);
+  const toDisable = enabledNow.filter((id) => !desiredSet.has(id));
+  const toEnable = desired.filter((id) => !enabledNow.includes(id));
+
+  // getAvailableStaticRuleCount() reports the budget left given what is
+  // *currently* enabled, so rules we are about to release have to be added back.
+  let budget = 0;
+  try {
+    budget = await chrome.declarativeNetRequest.getAvailableStaticRuleCount();
+  } catch (error) {
+    console.error("[jev] could not read the static rule budget", error);
+  }
+  for (const id of toDisable) budget += RULESET_SIZES[id] || 0;
+
+  const affordable = [];
+  const skipped = [];
+  for (const id of toEnable) {
+    const size = RULESET_SIZES[id] || 0;
+    if (size <= budget) {
+      affordable.push(id);
+      budget -= size;
+    } else {
+      skipped.push({ id, size, budget });
+    }
+  }
+
+  for (const entry of skipped) {
+    console.warn(
+      `[jev] not enabling ${entry.id}: needs ${entry.size} static rules, ` +
+        `${entry.budget} available. Protection is reduced but still active.`
+    );
   }
 
   try {
     await chrome.declarativeNetRequest.updateEnabledRulesets({
-      enableRulesetIds: enable,
-      disableRulesetIds: disable,
+      enableRulesetIds: affordable,
+      disableRulesetIds: toDisable,
     });
   } catch (error) {
     console.error("[jev] could not update rulesets", error);
+    return;
   }
+
+  const activeIds = [...enabledNow.filter((id) => desiredSet.has(id)), ...affordable];
+  lastRuleReport = {
+    active: activeIds.reduce((sum, id) => sum + (RULESET_SIZES[id] || 0), 0),
+    skipped: skipped.map((entry) => entry.id),
+  };
+}
+
+/**
+ * The generic cosmetic stylesheet is registered at runtime rather than declared
+ * in the manifest so it can be switched off. It applies to every site, so it is
+ * the one component a user is likely to want to disable.
+ */
+async function applyCosmeticScript(settings) {
+  const wanted = Boolean(
+    settings.enabled && settings.cosmeticSelectors && settings.cosmeticGeneric
+  );
+
+  let registered = [];
+  try {
+    registered = await chrome.scripting.getRegisteredContentScripts({
+      ids: [COSMETIC_SCRIPT_ID],
+    });
+  } catch (error) {
+    console.error("[jev] could not read registered scripts", error);
+    return;
+  }
+
+  const isOn = registered.length > 0;
+
+  try {
+    if (wanted && !isOn) {
+      await chrome.scripting.registerContentScripts([
+        {
+          id: COSMETIC_SCRIPT_ID,
+          matches: ["http://*/*", "https://*/*"],
+          css: ["cosmetic/generic.css"],
+          runAt: "document_start",
+          allFrames: false,
+        },
+      ]);
+    } else if (!wanted && isOn) {
+      await chrome.scripting.unregisterContentScripts({ ids: [COSMETIC_SCRIPT_ID] });
+    }
+  } catch (error) {
+    console.error("[jev] could not update the cosmetic stylesheet", error);
+  }
+}
+
+// ---------------------------------------------------------------- cosmetic lookup
+
+let cosmeticDomains = null;
+
+/**
+ * domains.json is 500 KB, so it is read once and kept in memory rather than
+ * shipped to every content script on every page.
+ */
+async function loadCosmeticDomains() {
+  if (cosmeticDomains) return cosmeticDomains;
+  try {
+    const response = await fetch(chrome.runtime.getURL("cosmetic/domains.json"));
+    cosmeticDomains = await response.json();
+  } catch (error) {
+    console.error("[jev] could not load the cosmetic domain map", error);
+    cosmeticDomains = {};
+  }
+  return cosmeticDomains;
+}
+
+/**
+ * Collects selectors for the host and each of its parent domains, so
+ * `news.bbc.co.uk` picks up rules written for `bbc.co.uk`. Stops before the
+ * bare public suffix, which would match far too much.
+ */
+function selectorsForHost(map, host) {
+  const parts = String(host || "").toLowerCase().split(".");
+  const out = [];
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    const candidate = parts.slice(i).join(".");
+    const found = map[candidate];
+    if (found) out.push(...found);
+  }
+  return [...new Set(out)];
+}
+
+async function handleCosmeticGet({ host }) {
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.cosmeticSelectors) return { selectors: [] };
+  const map = await loadCosmeticDomains();
+  return { selectors: selectorsForHost(map, host) };
 }
 
 async function syncFromSettings() {
   const settings = await getSettings();
   await applyRulesets(settings);
+  await applyCosmeticScript(settings);
   await updateBadge();
 }
 
@@ -148,6 +300,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .then(sendResponse)
         .catch((error) => sendResponse({ error: String(error) }));
       return true;
+
+    case "cosmetic:get":
+      handleCosmeticGet(message)
+        .then(sendResponse)
+        .catch((error) => sendResponse({ selectors: [], error: String(error) }));
+      return true;
+
+    case "rules:get":
+      sendResponse(lastRuleReport);
+      return false;
 
     case "settings:set":
       chrome.storage.local

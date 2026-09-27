@@ -120,6 +120,40 @@ function isProtectedHost(host = location.hostname) {
     return count;
   }
 
+  /**
+   * Domain-scoped cosmetic selectors from EasyList, looked up by the service
+   * worker. These are written for a specific site, so unlike the generic set
+   * they are unlikely to hide something legitimate.
+   *
+   * The generic set is not handled here: it is registered as a real stylesheet
+   * by background.js, so Chrome applies it natively at document_start instead
+   * of paying for 13,000 selectors over the message channel on every page.
+   */
+  async function applyCosmeticLists() {
+    const response = await safeSend({ type: "cosmetic:get", host: location.hostname });
+    const selectors = response?.selectors || [];
+    if (selectors.length === 0) return 0;
+
+    const style = document.createElement("style");
+    style.id = "jev-cosmetic-lists";
+    style.textContent = selectors
+      .map((selector) => `${selector}{display:none !important}`)
+      .join("\n");
+    (document.head || document.documentElement).appendChild(style);
+
+    // Count what actually matched, so the counter reflects reality rather than
+    // the size of the ruleset.
+    let matched = 0;
+    for (const selector of selectors) {
+      try {
+        matched += document.querySelectorAll(selector).length;
+      } catch {
+        /* a selector the browser will not parse; it is simply inert */
+      }
+    }
+    return matched;
+  }
+
   function adLikeness(el, style, rect) {
     let score = 0;
     const tag = el.tagName;
@@ -358,8 +392,10 @@ function isProtectedHost(host = location.hostname) {
     let staticHidden = 0;
     if (settings.cosmeticSelectors) {
       staticHidden = applyStaticSelectors();
-      if (staticHidden > 0) {
-        await safeSend({ type: "stats:bump", patch: { hidden: staticHidden } });
+      const listHidden = await applyCosmeticLists();
+      const total = staticHidden + listHidden;
+      if (total > 0) {
+        await safeSend({ type: "stats:bump", patch: { hidden: total } });
       }
     }
 

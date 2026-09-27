@@ -10,7 +10,8 @@
     "declarativeNetRequestWithHostAccess",
     "declarativeNetRequestFeedback",
     "storage",
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
 
   "host_permissions": [
@@ -52,6 +53,16 @@
 
   "declarative_net_request": {
     "rule_resources": [
+      { "id": "filters-01", "enabled": true, "path": "rules/filters-01.json" },
+      { "id": "filters-02", "enabled": true, "path": "rules/filters-02.json" },
+      { "id": "filters-03", "enabled": true, "path": "rules/filters-03.json" },
+      { "id": "filters-04", "enabled": true, "path": "rules/filters-04.json" },
+      { "id": "filters-05", "enabled": true, "path": "rules/filters-05.json" },
+      { "id": "filters-06", "enabled": true, "path": "rules/filters-06.json" },
+      { "id": "filters-07", "enabled": true, "path": "rules/filters-07.json" },
+      { "id": "filters-08", "enabled": true, "path": "rules/filters-08.json" },
+      { "id": "filters-09", "enabled": true, "path": "rules/filters-09.json" },
+      { "id": "filters-10", "enabled": true, "path": "rules/filters-10.json" },
       { "id": "ads", "enabled": true, "path": "rules/ads.json" },
       { "id": "redirects", "enabled": true, "path": "rules/redirects.json" },
       { "id": "tracking_params", "enabled": true, "path": "rules/tracking-params.json" }
