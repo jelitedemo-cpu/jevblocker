@@ -189,18 +189,133 @@ async function verifyRules(cdp, targetId) {
 }
 
 /**
+ * Verifies the site-specific cosmetic path: the content script asks the service
+ * worker for the selectors matching its host, and the worker walks up the
+ * parent domains to find them.
+ *
+ * The chosen domain is remapped to 127.0.0.1 with --host-resolver-rules, so a
+ * real EasyList entry can be exercised without any traffic leaving the machine.
+ */
+async function runCosmeticDomainCheck(cdp, domain, selector) {
+  const marker = selector.slice(1);
+
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(
+      `<!doctype html><html><head><meta charset="utf-8"><title>jev domain</title></head>` +
+        `<body><div id="${marker}">site-specific target</div></body></html>`
+    );
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+
+  const { targetId } = await cdp.send("Target.createTarget", {
+    url: `http://${domain}:${port}/page`,
+  });
+  await sleep(2500);
+  server.closeAllConnections?.();
+  await new Promise((resolve) => server.close(resolve));
+
+  let parsed = { display: null, styleInjected: false, error: null };
+  try {
+    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+    const { result } = await cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: `(() => {
+          const el = document.getElementById(${JSON.stringify(marker)});
+          return JSON.stringify({
+            display: el ? getComputedStyle(el).display : null,
+            styleInjected: Boolean(document.getElementById("jev-cosmetic-lists")),
+          });
+        })()`,
+        returnByValue: true,
+      },
+      sessionId
+    );
+    parsed = { ...JSON.parse(result.value), error: null };
+  } catch (error) {
+    parsed.error = error.message;
+  }
+
+  const ok = parsed.display === "none";
+  console.log(
+    `  ${ok ? "ok  " : "FAIL"} site-specific rule hides ${selector} on ${domain}` +
+      (ok ? "" : `   (display=${parsed.display}, style injected=${parsed.styleInjected})`)
+  );
+  return ok;
+}
+/**
+ * Picks selectors that are genuinely present in the generated cosmetic output,
+ * so the tests cannot drift out of sync with the filter lists.
+ *
+ * The batching is the risky part: selectors are comma-joined 50 to a rule, so
+ * one malformed selector would silently take 49 valid ones down with it.
+ * Counting the parsed rules is what catches that.
+ */
+function cosmeticProbe() {
+  const css = readFileSync(path.join(EXTENSION_DIR, "cosmetic", "generic.css"), "utf8");
+  const batches = css.split("\n").filter((line) => line.includes("{display:none"));
+
+  // One test element per batch.
+  //
+  // Extension-injected CSS does not appear in document.styleSheets -- Chrome
+  // applies it outside the page's view -- so a dropped batch cannot be found by
+  // counting parsed rules. The only reliable question is whether a selector from
+  // that batch actually matched something, so every batch gets an element.
+  const markers = [];
+  for (const batch of batches) {
+    const first = batch.split("{")[0].split(",")[0].trim();
+    const idMatch = /^#([A-Za-z][\w-]*)$/.exec(first);
+    const classMatch = /^\.([A-Za-z][\w-]*)$/.exec(first);
+    if (idMatch) markers.push({ kind: "id", name: idMatch[1] });
+    else if (classMatch) markers.push({ kind: "class", name: classMatch[1] });
+  }
+
+  // Also pick a site-specific entry: a plain domain (no wildcard) whose rules
+  // include a simple #id, so a matching element can be built for it.
+  const map = JSON.parse(
+    readFileSync(path.join(EXTENSION_DIR, "cosmetic", "domains.json"), "utf8")
+  );
+  let domain = null;
+  let domainSelector = null;
+  for (const key of Object.keys(map).sort()) {
+    if (key.includes("*")) continue;
+    if (map[key].length < 5) continue;
+    const simple = map[key].find((s) => /^#[A-Za-z][\w-]*$/.test(s));
+    if (simple) {
+      domain = key;
+      domainSelector = simple;
+      break;
+    }
+  }
+
+  return { batchCount: batches.length, markers, domain, domainSelector };
+}
+
+/**
  * A real navigation, not a simulated match.
  *
- * One page load asserts two things at once:
+ * One page load asserts three things at once:
  *   - the landing request arrives with its tracking parameters already gone
  *   - the ad request never arrives at all
+ *   - a generic cosmetic selector from EasyList actually hides its element
  *
  * The ad host is remapped to 127.0.0.1 with --host-resolver-rules, so if the
  * block rule fails the request lands on our own server and shows up in the log
  * instead of quietly going out to the internet.
  */
-async function runEndToEnd(cdp) {
+async function runEndToEnd(cdp, probe) {
   const seen = [];
+  const markers = probe.markers || [];
+  const markerHtml = markers
+    .map((m, index) =>
+      m.kind === "id"
+        ? `<div id="${m.name}">batch ${index}</div>`
+        : `<div class="${m.name}">batch ${index}</div>`
+    )
+    .join("");
 
   const server = createServer((req, res) => {
     seen.push(req.url);
@@ -214,6 +329,7 @@ async function runEndToEnd(cdp) {
       `<!doctype html><html><head><meta charset="utf-8"><title>jev e2e</title></head><body>` +
         `<img src="http://ad.doubleclick.net:${server.address().port}/pixel.gif" ` +
         `width="1" height="1" alt="">` +
+        markerHtml +
         `<p>landing</p></body></html>`
     );
   });
@@ -222,7 +338,7 @@ async function runEndToEnd(cdp) {
   const port = server.address().port;
 
   const landing = `http://127.0.0.1:${port}/landing?utm_source=news&gclid=abc&keep=1`;
-  await cdp.send("Target.createTarget", { url: landing });
+  const { targetId } = await cdp.send("Target.createTarget", { url: landing });
 
   // Give the navigation, the redirect and the image request time to settle.
   await sleep(3000);
@@ -235,12 +351,48 @@ async function runEndToEnd(cdp) {
   const landingRequest = seen.find((url) => url.startsWith("/landing"));
   const pixelRequest = seen.find((url) => url.startsWith("/pixel"));
 
+  // --- cosmetic check -----------------------------------------------------
+  let cosmetic = { total: markers.length, hidden: 0, visible: [], error: null };
+  try {
+    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+    const { result } = await cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: `(() => {
+          const list = ${JSON.stringify(markers)};
+          let hidden = 0;
+          const visible = [];
+          for (const m of list) {
+            const el = m.kind === "id"
+              ? document.getElementById(m.name)
+              : document.querySelector("." + m.name);
+            if (!el) { visible.push(m.name + " (missing)"); continue; }
+            if (getComputedStyle(el).display === "none") hidden += 1;
+            else visible.push(m.name);
+          }
+          return JSON.stringify({ hidden, visible: visible.slice(0, 8) });
+        })()`,
+        returnByValue: true,
+      },
+      sessionId
+    );
+    cosmetic = { ...cosmetic, ...JSON.parse(result.value), error: null };
+  } catch (error) {
+    cosmetic.error = error.message;
+  }
+
+  const cosmeticOk = !cosmetic.error && cosmetic.hidden === cosmetic.total;
+
   const checks = [
     ["landing request arrived", Boolean(landingRequest)],
     ["utm_source stripped", Boolean(landingRequest) && !landingRequest.includes("utm_source")],
     ["gclid stripped", Boolean(landingRequest) && !landingRequest.includes("gclid")],
     ["other params preserved", Boolean(landingRequest) && landingRequest.includes("keep=1")],
     ["ad request never reached the server", !pixelRequest],
+    [
+      `every cosmetic batch applied (${cosmetic.hidden}/${cosmetic.total})`,
+      cosmeticOk,
+    ],
   ];
 
   let failures = 0;
@@ -249,6 +401,17 @@ async function runEndToEnd(cdp) {
     console.log(`  ${ok ? "ok  " : "FAIL"} ${label}`);
   }
   console.log(`  requested: ${seen.join("  ") || "(nothing)"}`);
+
+  if (!cosmeticOk && !cosmetic.error) {
+    console.log(
+      `  ${cosmetic.visible.length} batch(es) did not apply, e.g. ${cosmetic.visible.join(", ")}`
+    );
+    console.log(
+      "  A malformed selector takes its whole batch down. Find it with " +
+        "tools/find-rejected-rules.mjs logic, or lower the batch size in compile_filters.py."
+    );
+  }
+  if (cosmetic.error) console.log(`  cosmetic check failed to run: ${cosmetic.error}`);
 
   return failures === 0;
 }
@@ -385,6 +548,10 @@ async function main() {
 
   const chromePath = findChrome();
 
+  // Read before Chrome starts, because the cosmetic probe picks a domain that
+  // then has to be added to the host-resolver rules.
+  const probe = cosmeticProbe();
+
   // An explicit profile persists between runs, so a saved API key survives.
   // Without one, a throwaway profile is used and cleaned up afterwards.
   const profileDir = explicitProfile
@@ -401,7 +568,11 @@ async function main() {
     "--disable-features=Translate",
     "--disable-background-networking",
     // Keeps the end-to-end ad request on this machine instead of the internet.
-    "--host-resolver-rules=MAP ad.doubleclick.net 127.0.0.1",
+    "--host-resolver-rules=" +
+      ["ad.doubleclick.net", probe.domain]
+        .filter(Boolean)
+        .map((host) => `MAP ${host} 127.0.0.1`)
+        .join(", "),
     "about:blank",
   ];
   if (!headed) chromeArgs.unshift("--headless=new");
@@ -466,10 +637,19 @@ async function main() {
     console.log("\nRule checks (asked of Chrome, not assumed):\n");
     const rulesOk = await verifyRules(cdp, worker.targetId);
 
-    console.log("\nEnd-to-end (real navigation against a local server):\n");
-    const e2eOk = await runEndToEnd(cdp);
+    console.log("\nCosmetic filtering (site-specific rules):\n");
+    const domainOk = probe.domain
+      ? await runCosmeticDomainCheck(cdp, probe.domain, probe.domainSelector)
+      : true;
 
-    const passed = accountingOk && rulesOk && e2eOk;
+    // The generic stylesheet is registered at runtime, so let the service worker
+    // finish before navigating to a page that expects it.
+    await sleep(1200);
+
+    console.log("\nEnd-to-end (real navigation against a local server):\n");
+    const e2eOk = await runEndToEnd(cdp, probe);
+
+    const passed = accountingOk && rulesOk && domainOk && e2eOk;
     if (!passed) process.exitCode = 1;
 
     if (captureLog && logLines.length) {

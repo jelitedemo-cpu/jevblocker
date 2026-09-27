@@ -499,7 +499,11 @@ def compile_cosmetic(lists: dict[str, str]) -> tuple[list[str], dict, int]:
                 for domain in domains:
                     if domain.startswith("~"):
                         continue  # negated domain scope, rare; skip
-                    by_domain.setdefault(domain, []).append(selector)
+                    # `amazon.*` means amazon under any TLD. Stored as
+                    # `*.amazon` so the lookup can match it without knowing
+                    # which TLDs exist.
+                    key = "*." + domain[:-2] if domain.endswith(".*") else domain
+                    by_domain.setdefault(key, []).append(selector)
 
     for domain, selectors in list(by_domain.items()):
         banned = exceptions.get(domain)

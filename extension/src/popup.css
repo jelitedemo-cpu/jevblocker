@@ -51,6 +51,18 @@ h1 {
   font-size: 12px;
 }
 
+.rules {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Only shown when Chrome's static-rule budget was too tight to load every
+   ruleset, which means protection is reduced rather than absent. */
+.rules.reduced {
+  color: #b45309;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -50,10 +50,28 @@
 
         <label class="row">
           <span>
-            <strong>Hide obvious ad containers</strong>
-            <em>Applies a small set of high-precision CSS selectors.</em>
+            <strong>Hide ad containers</strong>
+            <em>
+              High-precision selectors, plus 7,695 site-specific rules from
+              EasyList. These target a named site, so they rarely hide anything
+              they should not.
+            </em>
           </span>
           <input type="checkbox" id="cosmeticSelectors" />
+        </label>
+
+        <label class="row">
+          <span>
+            <strong>Hide generic ad patterns on every site</strong>
+            <em>
+              13,628 EasyList selectors applied everywhere. This is what makes
+              ads disappear and the page reflow instead of leaving holes, and it
+              is also the only part of the extension that can hide something
+              legitimate. If a site loses content it should have kept, this is
+              the switch to turn off.
+            </em>
+          </span>
+          <input type="checkbox" id="cosmeticGeneric" />
         </label>
       </section>
 

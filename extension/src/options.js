@@ -6,6 +6,7 @@ const fields = {
   blockRedirects: document.getElementById("blockRedirects"),
   stripTrackingParams: document.getElementById("stripTrackingParams"),
   cosmeticSelectors: document.getElementById("cosmeticSelectors"),
+  cosmeticGeneric: document.getElementById("cosmeticGeneric"),
   jevEnabled: document.getElementById("jevEnabled"),
   jevApiKey: document.getElementById("jevApiKey"),
   jevModel: document.getElementById("jevModel"),
@@ -28,6 +29,7 @@ const CHECKBOXES = [
   "blockRedirects",
   "stripTrackingParams",
   "cosmeticSelectors",
+  "cosmeticGeneric",
   "jevEnabled",
 ];
 

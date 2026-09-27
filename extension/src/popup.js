@@ -8,6 +8,7 @@ const el = {
   jev: document.getElementById("statJev"),
   judge: document.getElementById("judge"),
   message: document.getElementById("message"),
+  rules: document.getElementById("rules"),
   openOptions: document.getElementById("openOptions"),
   resetStats: document.getElementById("resetStats"),
 };
@@ -16,6 +17,33 @@ let settings = null;
 
 function say(text) {
   el.message.textContent = text || "";
+}
+
+/**
+ * Surfaces how many static rules Chrome actually accepted. If the budget was
+ * too tight for some rulesets, the extension degrades rather than fails, and
+ * the user should be able to see that rather than assume full coverage.
+ */
+async function renderRules() {
+  let report = null;
+  try {
+    report = await chrome.runtime.sendMessage({ type: "rules:get" });
+  } catch {
+    report = null;
+  }
+
+  if (!report || !report.active) {
+    el.rules.textContent = "";
+    return;
+  }
+
+  const formatted = report.active.toLocaleString("en-US");
+  const reduced = Boolean(report.skipped?.length);
+  el.rules.classList.toggle("reduced", reduced);
+  el.rules.textContent = reduced
+    ? `${formatted} rules active — ${report.skipped.length} ruleset(s) did not fit ` +
+      `Chrome's budget and are off.`
+    : `${formatted} rules active`;
 }
 
 async function render() {
@@ -38,6 +66,7 @@ async function render() {
   }
 
   el.judge.disabled = !settings.jevEnabled;
+  await renderRules();
 }
 
 el.enabled.addEventListener("change", async () => {

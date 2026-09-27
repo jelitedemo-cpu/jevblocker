@@ -203,15 +203,23 @@ async function loadCosmeticDomains() {
  * Collects selectors for the host and each of its parent domains, so
  * `news.bbc.co.uk` picks up rules written for `bbc.co.uk`. Stops before the
  * bare public suffix, which would match far too much.
+ *
+ * Also checks the `*.name` form, which is how EasyList's `name.*` entries are
+ * stored -- those mean "this name under any TLD" and would otherwise never
+ * match, since a real hostname never contains a literal asterisk.
  */
 function selectorsForHost(map, host) {
   const parts = String(host || "").toLowerCase().split(".");
   const out = [];
+
   for (let i = 0; i < parts.length - 1; i += 1) {
-    const candidate = parts.slice(i).join(".");
-    const found = map[candidate];
+    const found = map[parts.slice(i).join(".")];
     if (found) out.push(...found);
+
+    const wildcard = map["*." + parts.slice(i, parts.length - 1).join(".")];
+    if (wildcard) out.push(...wildcard);
   }
+
   return [...new Set(out)];
 }
 
