@@ -2,14 +2,22 @@
 
 A system-wide DNS ad and redirect blocker for Android. No root required.
 
-There are two clients in this repo sharing one curated blocklist:
+There are two clients in this repo. They share a curated blocklist but not the
+same engine:
 
 - **`app/`** — the Android app. System-wide DNS filtering, covers every browser
   and app. This document.
-- **`extension/`** — a Chrome extension for desktop. Full request-level blocking
-  plus Jev-powered judgement of individual page elements. See
-  [`extension/README.md`](extension/README.md). Verified working on Chrome 153
-  on Windows; run `run-in-chrome.cmd` from the project root to launch it.
+- **`extension/`** — a Chrome extension for desktop. Blocks ads, trackers and
+  redirect chains through Chrome's declarativeNetRequest engine using the same
+  EasyList and EasyPrivacy lists Brave and uBlock Origin use — about 115,000
+  rules — plus cosmetic filtering and Jev-powered judgement of individual page
+  elements. See [`extension/README.md`](extension/README.md). Verified working
+  on Chrome 153 on Windows; run `run-in-chrome.cmd` from the project root to
+  launch it.
+
+> **Chrome for Android still has no extension support.** The extension is
+> desktop-only. For Android, use the app in `app/`, or Edge Canary / Kiwi
+> Browser, which load unpacked Chrome extensions.
 
 It runs a local `VpnService` tunnel that carries **only DNS traffic**, answers
 blocked lookups locally with NXDOMAIN, and relays everything else to the
@@ -89,16 +97,27 @@ run-in-chrome.cmd             Windows launcher and verifier for the extension
 tools/verify_packets.py
 tools/make_rules.py
 tools/make_icons.py
-tools/chrome-load-extension.mjs
+tools/compile_filters.py      EasyList + EasyPrivacy to declarativeNetRequest
+tools/analyze_lists.mjs       reports filter composition before compiling
+tools/chrome-load-extension.mjs   drives real Chrome over CDP to verify
+tools/find-rejected-rules.mjs     bisects rules Chrome silently refuses
+tools/check-regexes.mjs           asks Chrome which regexes it supports
+tools/jev-probe.mjs               live probe of the TypeSafe API
 ```
 
 `DnsPacket` and `IpPacket` deliberately have no Android dependencies, so the
 byte-level logic runs under plain JVM unit tests.
 
 `tools/make_rules.py` compiles `assets/blocklist.txt` into the extension's
-declarativeNetRequest rulesets, so both clients block the same domains from one
-source of truth. `tools/make_icons.py` writes the extension's PNG icons using
-only the standard library.
+curated rulesets — 143 domains covering the worst-known offenders. Those load
+*first* in the extension, so they survive a tight static-rule budget that the
+much larger EasyList rulesets may not. `tools/make_icons.py` writes the
+extension's PNG icons using only the standard library.
+
+The bulk of the extension's blocking comes from `tools/compile_filters.py`,
+which compiles EasyList and EasyPrivacy into about 115,000 declarativeNetRequest
+rules plus 30,000 cosmetic selectors. A scheduled job refreshes them weekly.
+See [`extension/README.md`](extension/README.md) for the full pipeline.
 
 `tools/verify_packets.py` is a line-by-line port of those two classes. It exists
 so the wire format can be checked without an Android toolchain, which matters
