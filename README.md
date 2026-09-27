@@ -8,7 +8,8 @@ There are two clients in this repo sharing one curated blocklist:
   and app. This document.
 - **`extension/`** — a Chrome extension for desktop. Full request-level blocking
   plus Jev-powered judgement of individual page elements. See
-  [`extension/README.md`](extension/README.md).
+  [`extension/README.md`](extension/README.md). Verified working on Chrome 153
+  on Windows; run `run-in-chrome.cmd` from the project root to launch it.
 
 It runs a local `VpnService` tunnel that carries **only DNS traffic**, answers
 blocked lookups locally with NXDOMAIN, and relays everything else to the
@@ -84,9 +85,11 @@ app/src/main/java/com/jev/blocker/
   MainActivity.kt       toggle, stats, blocklist management
 app/src/test/java/com/jev/blocker/PacketTest.kt
 extension/                    Chrome extension, see its own README
+run-in-chrome.cmd             Windows launcher and verifier for the extension
 tools/verify_packets.py
 tools/make_rules.py
 tools/make_icons.py
+tools/chrome-load-extension.mjs
 ```
 
 `DnsPacket` and `IpPacket` deliberately have no Android dependencies, so the

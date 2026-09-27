@@ -109,6 +109,81 @@ def write_rules(path, entries):
     return len(rules)
 
 
+# Tracking parameters to strip from top-level navigations.
+#
+# These deliberately use urlFilter rather than regexFilter. A regexFilter with
+# this many alternatives exceeds Chrome's 2KB compiled-regex memory limit and
+# the rule is then skipped *silently* — the ruleset still loads, so nothing
+# looks wrong. urlFilter has no such limit.
+#
+# One rule per parameter, and every rule removes the whole list, so whichever
+# one fires cleans the URL completely. If the transform changes nothing Chrome
+# performs no redirect at all, which is what keeps this from looping.
+TRACKING_PARAMS = [
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "utm_name",
+    "utm_reader",
+    "utm_creative_format",
+    "utm_marketing_tactic",
+    "gclid",
+    "gclsrc",
+    "dclid",
+    "fbclid",
+    "msclkid",
+    "twclid",
+    "ttclid",
+    "yclid",
+    "igshid",
+    "mc_eid",
+    "mc_cid",
+    "_openstat",
+    "mkt_tok",
+    "oly_anon_id",
+    "oly_enc_id",
+    "vero_id",
+    "wickedid",
+    "ref_src",
+    "ref_url",
+    "spm",
+    "scm",
+    "sc_cid",
+    "trk",
+    "hsa_cam",
+    "hsa_grp",
+]
+
+
+def write_tracking_rules(path):
+    rules = []
+    for index, param in enumerate(TRACKING_PARAMS, start=1):
+        rules.append(
+            {
+                "id": index,
+                "priority": 2,
+                "action": {
+                    "type": "redirect",
+                    "redirect": {
+                        "transform": {
+                            "queryTransform": {"removeParams": list(TRACKING_PARAMS)}
+                        }
+                    },
+                },
+                "condition": {
+                    "urlFilter": f"{param}=",
+                    "resourceTypes": ["main_frame"],
+                },
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rules, indent=2) + "\n", encoding="utf-8")
+    return len(rules)
+
+
 def main():
     domains = read_domains()
 
@@ -126,11 +201,14 @@ def main():
         redirect_entries.append((domain, ["main_frame"]))
     redirect_count = write_rules(RULES_DIR / "redirects.json", redirect_entries)
 
+    tracking_count = write_tracking_rules(RULES_DIR / "tracking-params.json")
+
     print(f"blocklist domains : {len(domains)}")
     print(f"ads.json          : {ad_count} rules")
     print(f"redirects.json    : {redirect_count} rules")
+    print(f"tracking-params.json : {tracking_count} rules")
 
-    total = ad_count + redirect_count
+    total = ad_count + redirect_count + tracking_count
     if total > 30_000:
         sys.exit(f"too many static rules ({total}); Chrome guarantees 30,000")
 

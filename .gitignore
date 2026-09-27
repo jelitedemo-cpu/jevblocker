@@ -14,3 +14,7 @@ local.properties
 *.keystore
 !debug.keystore
 .workbuddy-ai/
+
+# Chrome writes its compiled declarativeNetRequest cache into the unpacked
+# extension folder on first load. It is regenerated automatically.
+extension/_metadata/

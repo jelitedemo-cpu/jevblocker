@@ -7,12 +7,49 @@ engine, then asks **Jev** to judge the elements a blocklist cannot.
 > no extension support at all.** This works in desktop Chrome. For Android, see
 > the note at the bottom.
 
-## Install (unpacked)
+## Running it on Windows
+
+Verified against **Chrome 153.0.8010.53 on Windows**. Two ways in.
+
+### One click
+
+From the project root, double-click `run-in-chrome.cmd` — or from a terminal:
+
+```cmd
+run-in-chrome.cmd          :: launch Chrome with the extension loaded
+run-in-chrome.cmd verify   :: check it loads and that blocking works
+```
+
+This launches Chrome with a dedicated profile at
+`%LOCALAPPDATA%\JevBlocker\chrome-profile`, so your normal profile is never
+touched and your Jev API key survives between runs. It needs Node.js on `PATH`;
+if it is missing, the script prints the manual steps instead.
+
+### Manual
 
 1. Open `chrome://extensions`
 2. Turn on **Developer mode** (top right)
 3. Click **Load unpacked** and select this `extension/` folder
 4. Pin the toolbar icon
+
+> **Chrome 137 removed the `--load-extension` flag.** Any launcher built around
+> it silently does nothing on current Chrome. The supported replacement is the
+> DevTools Protocol command `Extensions.loadUnpacked`, which is what
+> `run-in-chrome.cmd` drives.
+
+## What "verify" actually checks
+
+`run-in-chrome.cmd verify` is not a smoke test. It loads the extension into a
+real Chrome, attaches to the service worker, and then:
+
+- asks Chrome which rules match eight specific URLs, including two negative
+  cases that must **not** match
+- performs a real navigation to a local server and asserts the outcome: the
+  landing request arrives as `/landing?keep=1` with `utm_source` and `gclid`
+  gone, and the ad request never reaches the server at all
+
+The ad host is remapped to `127.0.0.1` for that last check, so a failing block
+rule shows up on our own server instead of quietly going out to the internet.
 
 ## Add your Jev API key
 
@@ -91,6 +128,21 @@ Regenerate the rules after editing the blocklist:
 python tools/make_rules.py
 python tools/make_icons.py
 ```
+
+## Two Chrome limits worth knowing
+
+Both of these cost real debugging time, and neither is obvious.
+
+**A `regexFilter` over 2KB of compiled memory is skipped silently.** The rule
+simply does not exist at runtime — the ruleset still loads, the extension still
+works, and `getDisabledRuleIds()` still returns an empty array. There is no
+error anywhere. The tracking-parameter rules originally used one `regexFilter`
+with 29 alternatives and were dropped for this reason. They now use `urlFilter`,
+which has no such limit. If you add regex rules, keep them small.
+
+**`chrome.runtime.sendMessage` throws synchronously** once the extension context
+is invalidated, which happens on every reload during development. A `.catch()`
+on the returned promise does not cover it.
 
 ## Known limitations
 
