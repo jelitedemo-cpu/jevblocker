@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Jev Blocker",
+  "version": "0.1.0",
+  "description": "Blocks ads, trackers and redirect chains, then uses Jev to judge the elements a blocklist cannot.",
+  "minimum_chrome_version": "116",
+
+  "permissions": [
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
+    "declarativeNetRequestFeedback",
+    "storage",
+    "activeTab"
+  ],
+
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.typesafe.ai/*"
+  ],
+
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Jev Blocker",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "options_page": "src/options.html",
+
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "ads", "enabled": true, "path": "rules/ads.json" },
+      { "id": "redirects", "enabled": true, "path": "rules/redirects.json" },
+      { "id": "tracking_params", "enabled": true, "path": "rules/tracking-params.json" }
+    ]
+  }
+}

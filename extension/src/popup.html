@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jev Blocker</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Jev Blocker</h1>
+      <label class="switch" title="Turn protection on or off">
+        <input type="checkbox" id="enabled" />
+        <span class="track"><span class="thumb"></span></span>
+      </label>
+    </header>
+
+    <p class="status" id="status">Loading…</p>
+
+    <div class="stats">
+      <div class="stat">
+        <span class="value" id="statBlocked">0</span>
+        <span class="label">Blocked</span>
+      </div>
+      <div class="stat">
+        <span class="value" id="statHidden">0</span>
+        <span class="label">Hidden</span>
+      </div>
+      <div class="stat">
+        <span class="value" id="statJev">0</span>
+        <span class="label">Jev calls</span>
+      </div>
+    </div>
+
+    <button id="judge" class="primary">Judge this page with Jev</button>
+    <p class="message" id="message"></p>
+
+    <footer>
+      <a href="#" id="openOptions">Settings</a>
+      <button id="resetStats" class="link">Reset counters</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

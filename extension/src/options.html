@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jev Blocker — Settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Jev Blocker</h1>
+      <p class="lede">
+        Blocklists handle the bulk of it. Jev is only asked about the elements a
+        blocklist cannot judge — the ones that might be an ad and might not.
+      </p>
+
+      <section>
+        <h2>Protection</h2>
+
+        <label class="row">
+          <span>
+            <strong>Enabled</strong>
+            <em>Master switch for all blocking.</em>
+          </span>
+          <input type="checkbox" id="enabled" />
+        </label>
+
+        <label class="row">
+          <span>
+            <strong>Block ads and trackers</strong>
+            <em>Blocks third-party requests to known ad and tracker hosts.</em>
+          </span>
+          <input type="checkbox" id="blockAds" />
+        </label>
+
+        <label class="row">
+          <span>
+            <strong>Block redirect chains</strong>
+            <em>Blocks top-level navigation to known ad redirectors.</em>
+          </span>
+          <input type="checkbox" id="blockRedirects" />
+        </label>
+
+        <label class="row">
+          <span>
+            <strong>Strip tracking parameters</strong>
+            <em>Removes utm_*, gclid, fbclid and friends from addresses.</em>
+          </span>
+          <input type="checkbox" id="stripTrackingParams" />
+        </label>
+
+        <label class="row">
+          <span>
+            <strong>Hide obvious ad containers</strong>
+            <em>Applies a small set of high-precision CSS selectors.</em>
+          </span>
+          <input type="checkbox" id="cosmeticSelectors" />
+        </label>
+      </section>
+
+      <section>
+        <h2>Jev</h2>
+
+        <label class="row">
+          <span>
+            <strong>Use Jev</strong>
+            <em>Ask Jev to judge ambiguous elements on each page.</em>
+          </span>
+          <input type="checkbox" id="jevEnabled" />
+        </label>
+
+        <label class="field">
+          <span>API key</span>
+          <input type="password" id="jevApiKey" placeholder="ts_..." autocomplete="off" spellcheck="false" />
+          <em>
+            Stored in this browser only, and only ever read by the extension's
+            service worker. It is never sent to a page.
+          </em>
+        </label>
+
+        <label class="field">
+          <span>Model</span>
+          <input type="text" id="jevModel" placeholder="jev-latest" spellcheck="false" />
+        </label>
+
+        <label class="field">
+          <span>
+            Confidence threshold
+            <output id="jevThresholdOut">0.80</output>
+          </span>
+          <input type="range" id="jevThreshold" min="0.5" max="0.99" step="0.01" />
+          <em>
+            An element is hidden only when Jev's probability clears this. Higher
+            is safer, lower hides more.
+          </em>
+        </label>
+
+        <label class="field">
+          <span>
+            Max elements per page
+            <output id="jevMaxCandidatesOut">8</output>
+          </span>
+          <input type="range" id="jevMaxCandidates" min="1" max="20" step="1" />
+          <em>All are asked in a single request, so more costs almost nothing in latency.</em>
+        </label>
+
+        <label class="field">
+          <span>
+            Minimum gap between requests
+            <output id="jevMinIntervalOut">2500</output>
+            <small>ms</small>
+          </span>
+          <input type="range" id="jevMinInterval" min="500" max="15000" step="500" />
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="save" class="primary">Save</button>
+        <button id="test">Test Jev connection</button>
+        <span class="result" id="result"></span>
+      </div>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

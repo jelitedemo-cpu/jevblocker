@@ -2,6 +2,14 @@
 
 A system-wide DNS ad and redirect blocker for Android. No root required.
 
+There are two clients in this repo sharing one curated blocklist:
+
+- **`app/`** — the Android app. System-wide DNS filtering, covers every browser
+  and app. This document.
+- **`extension/`** — a Chrome extension for desktop. Full request-level blocking
+  plus Jev-powered judgement of individual page elements. See
+  [`extension/README.md`](extension/README.md).
+
 It runs a local `VpnService` tunnel that carries **only DNS traffic**, answers
 blocked lookups locally with NXDOMAIN, and relays everything else to the
 resolver the system was already using. Because the tunnel holds a `/32` route
@@ -75,11 +83,19 @@ app/src/main/java/com/jev/blocker/
   vpn/JevVpnService.kt  tunnel setup and foreground service
   MainActivity.kt       toggle, stats, blocklist management
 app/src/test/java/com/jev/blocker/PacketTest.kt
+extension/                    Chrome extension, see its own README
 tools/verify_packets.py
+tools/make_rules.py
+tools/make_icons.py
 ```
 
 `DnsPacket` and `IpPacket` deliberately have no Android dependencies, so the
 byte-level logic runs under plain JVM unit tests.
+
+`tools/make_rules.py` compiles `assets/blocklist.txt` into the extension's
+declarativeNetRequest rulesets, so both clients block the same domains from one
+source of truth. `tools/make_icons.py` writes the extension's PNG icons using
+only the standard library.
 
 `tools/verify_packets.py` is a line-by-line port of those two classes. It exists
 so the wire format can be checked without an Android toolchain, which matters
