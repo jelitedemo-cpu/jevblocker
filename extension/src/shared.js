@@ -52,6 +52,54 @@ export async function resetStats() {
 }
 
 /**
+ * Turns a TypeSafe error response into something a human can act on.
+ *
+ * The server reports two *different* auth failures, verified against the live
+ * API, and they indict different things:
+ *
+ *   403 "Must supply an API key!"            -> the Authorization header was not
+ *                                               understood. That is our bug.
+ *   401 "Cannot authenticate with the server" -> the header was understood and
+ *                                               the key inside it was rejected.
+ *                                               That is the key's problem.
+ */
+function describeJevError(status, rawBody) {
+  let message = "";
+  let errorType = "";
+
+  try {
+    const parsed = JSON.parse(rawBody);
+    message = parsed?.detail?.message || "";
+    errorType = parsed?.detail?.error_type || "";
+  } catch {
+    message = String(rawBody || "").slice(0, 200);
+  }
+
+  switch (status) {
+    case 401:
+      return (
+        `Key rejected (401). ${message || "The server did not accept this API key."} ` +
+        "Jev is in early access, so a key that exists in the console but has not " +
+        "been activated yet fails exactly like this."
+      );
+    case 403:
+      return (
+        `No API key recognised (403). ${message} ` +
+        "This is a bug in the extension, not a problem with your key."
+      );
+    case 422:
+      return `Jev rejected the request as malformed (422). ${message}`;
+    case 429:
+      return "Rate limited by Jev (429). Wait a moment and try again.";
+    case 529:
+      return "Jev is overloaded (529). Try again shortly.";
+    default:
+      const tail = message || errorType;
+      return `Jev API ${status}${tail ? ` — ${tail}` : ""}`;
+  }
+}
+
+/**
  * Calls the TypeSafe evaluation endpoint.
  *
  * This runs only in the service worker. The API key is never handed to a
@@ -78,7 +126,7 @@ export async function callJev({ apiKey, model, state, questions }) {
     } catch {
       /* body already consumed or unreadable */
     }
-    throw new Error(`Jev API ${response.status}${detail ? ` — ${detail}` : ""}`);
+    throw new Error(describeJevError(response.status, detail));
   }
 
   return response.json();
