@@ -22,3 +22,4 @@ extension/_metadata/
 # Local Jev API key for the probe script. Never commit these.
 jev-api-key.txt
 .jev-key
+.cache/
