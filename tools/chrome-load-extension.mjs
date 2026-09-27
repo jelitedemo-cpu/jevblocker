@@ -15,6 +15,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as createProbeServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -32,7 +33,22 @@ const explicitProfile = profileArg
 const target = args.find((a) => !a.startsWith("--")) || "extension";
 
 const EXTENSION_DIR = path.resolve(target);
-const PORT = Number(process.env.JEV_CDP_PORT || 9223);
+
+// A fixed port collides when runs overlap or a previous Chrome has not finished
+// releasing it, which shows up as "Chrome did not open a debug port". Asking the
+// OS for a free one removes that failure mode.
+let PORT = Number(process.env.JEV_CDP_PORT || 0);
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createProbeServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 const CHROME_CANDIDATES = [
   process.env.JEV_CHROME,
@@ -64,7 +80,9 @@ async function waitForEndpoint(port, timeoutMs = 20000) {
     }
     await sleep(250);
   }
-  throw new Error(`Chrome did not open a debug port: ${lastError?.message || "timeout"}`);
+  throw new Error(
+    `Chrome did not open a debug port on ${port}: ${lastError?.message || "timeout"}`
+  );
 }
 
 class Cdp {
@@ -198,8 +216,10 @@ async function verifyRules(cdp, targetId) {
  */
 async function runCosmeticDomainCheck(cdp, domain, selector) {
   const marker = selector.slice(1);
+  const seen = [];
 
   const server = createServer((req, res) => {
+    seen.push(req.url);
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(
       `<!doctype html><html><head><meta charset="utf-8"><title>jev domain</title></head>` +
@@ -213,37 +233,55 @@ async function runCosmeticDomainCheck(cdp, domain, selector) {
   const { targetId } = await cdp.send("Target.createTarget", {
     url: `http://${domain}:${port}/page`,
   });
-  await sleep(2500);
+  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+
+  const expression = `(() => {
+    const el = document.getElementById(${JSON.stringify(marker)});
+    return JSON.stringify({
+      display: el ? getComputedStyle(el).display : null,
+      styleInjected: Boolean(document.getElementById("jev-cosmetic-lists")),
+      title: document.title,
+    });
+  })()`;
+
+  // Poll rather than sleep. Navigation timing varies enough that a fixed wait
+  // made this check fail roughly one run in three, and a flaky check is worse
+  // than no check -- it trains you to ignore failures.
+  let parsed = { display: null, styleInjected: false, title: null };
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    try {
+      const { result } = await cdp.send(
+        "Runtime.evaluate",
+        { expression, returnByValue: true },
+        sessionId
+      );
+      parsed = JSON.parse(result.value);
+    } catch {
+      /* navigation in flight; the context is replaced mid-load */
+    }
+    if (parsed.display === "none") break;
+    await sleep(250);
+  }
+
   server.closeAllConnections?.();
   await new Promise((resolve) => server.close(resolve));
 
-  let parsed = { display: null, styleInjected: false, error: null };
-  try {
-    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
-    const { result } = await cdp.send(
-      "Runtime.evaluate",
-      {
-        expression: `(() => {
-          const el = document.getElementById(${JSON.stringify(marker)});
-          return JSON.stringify({
-            display: el ? getComputedStyle(el).display : null,
-            styleInjected: Boolean(document.getElementById("jev-cosmetic-lists")),
-          });
-        })()`,
-        returnByValue: true,
-      },
-      sessionId
-    );
-    parsed = { ...JSON.parse(result.value), error: null };
-  } catch (error) {
-    parsed.error = error.message;
-  }
-
   const ok = parsed.display === "none";
   console.log(
-    `  ${ok ? "ok  " : "FAIL"} site-specific rule hides ${selector} on ${domain}` +
-      (ok ? "" : `   (display=${parsed.display}, style injected=${parsed.styleInjected})`)
+    `  ${ok ? "ok  " : "FAIL"} site-specific rule hides ${selector} on ${domain}`
   );
+  if (!ok) {
+    // Distinguish "the page never loaded" from "the selector did not apply".
+    console.log(`        display=${parsed.display}  style injected=${parsed.styleInjected}`);
+    console.log(`        page title=${JSON.stringify(parsed.title)}`);
+    console.log(`        server received: ${seen.join(", ") || "(nothing)"}`);
+    console.log(
+      seen.length === 0
+        ? "        -> the request never reached the server; the domain is being blocked"
+        : "        -> the page loaded but the selector never applied"
+    );
+  }
   return ok;
 }
 /**
@@ -548,6 +586,11 @@ async function main() {
 
   const chromePath = findChrome();
 
+  // Ask the OS for a free port unless one was pinned via JEV_CDP_PORT. A fixed
+  // port collides when runs overlap or a previous Chrome has not released it,
+  // which surfaced as a confusing "Chrome did not open a debug port" failure.
+  if (!PORT) PORT = await freePort();
+
   // Read before Chrome starts, because the cosmetic probe picks a domain that
   // then has to be added to the host-resolver rules.
   const probe = cosmeticProbe();
@@ -582,7 +625,8 @@ async function main() {
 
   console.log(`chrome    : ${chromePath}`);
   console.log(`extension : ${EXTENSION_DIR}`);
-  console.log(`mode      : ${headed ? "headed" : "headless"}\n`);
+  console.log(`mode      : ${headed ? "headed" : "headless"}`);
+  console.log(`cdp port  : ${PORT}${process.env.JEV_CDP_PORT ? " (pinned)" : " (auto)"}\n`);
 
   const child = spawn(chromePath, chromeArgs, {
     stdio: captureLog ? ["ignore", "pipe", "pipe"] : "ignore",
@@ -670,7 +714,9 @@ async function main() {
     cdp?.close();
     if (!keepOpen) {
       child.kill();
-      await sleep(500);
+      // Chrome takes a moment to release its profile lock and sockets on
+      // Windows; starting the next run too soon is what produced port failures.
+      await sleep(900);
       if (ephemeralProfile) {
         try {
           rmSync(profileDir, { recursive: true, force: true });
