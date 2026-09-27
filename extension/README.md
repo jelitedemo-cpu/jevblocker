@@ -3,6 +3,10 @@
 Blocks ads, trackers and redirect chains with Chrome's declarativeNetRequest
 engine, then asks **Jev** to judge the elements a blocklist cannot.
 
+> **There is no `.exe` and no Start-menu entry.** This is a browser extension, so
+> it lives inside Chrome — you load it once, then reach it from the toolbar
+> (the puzzle-piece icon, top right). Nothing to install, nothing to launch.
+
 > **Chrome for Android does not support extensions — as of mid-2026 it still has
 > no extension support at all.** This works in desktop Chrome. For Android, see
 > the note at the bottom.
@@ -66,7 +70,7 @@ can compare how the page behaves with and without it.
 
 ## How the two halves work
 
-**Blocklists do the bulk.** 143 domains compiled into 286 declarativeNetRequest
+**Blocklists do the bulk.** 143 domains compiled into 321 declarativeNetRequest
 rules, generated from the same curated list the Android app uses:
 
 - `rules/ads.json` — blocks third-party requests to ad and tracker hosts
@@ -113,7 +117,7 @@ things it should not, raise the threshold.
 manifest.json                 MV3, permissions, ruleset wiring
 rules/ads.json                generated — third-party ad and tracker blocking
 rules/redirects.json          generated — navigation blocking for redirectors
-rules/tracking-params.json    hand-written — one queryTransform redirect rule
+rules/tracking-params.json    generated — 35 queryTransform redirect rules
 src/background.js             service worker: rulesets, stats, Jev calls
 src/content.js                candidate scoring, cosmetic hiding, Jev questions
 src/shared.js                 settings, stats, the Jev API client
