@@ -148,6 +148,38 @@ which has no such limit. If you add regex rules, keep them small.
 is invalidated, which happens on every reload during development. A `.catch()`
 on the returned promise does not cover it.
 
+## YouTube and other video sites
+
+**No — this does not block YouTube ads, and it deliberately does not try.**
+
+YouTube's ads come from the same hosts as the video itself (`youtube.com`,
+`googlevideo.com`), so a domain blocklist cannot separate them. Blocking those
+hosts would stop playback entirely rather than remove an ad. Increasingly the ads
+are stitched into the video stream server-side, which means there is no separate
+request to block in the first place.
+
+The cosmetic layer is not a workaround either. YouTube's ad UI lives inside the
+player's own DOM, and `AD_HINT` **does** match it — `ytp-ad-skip-button`,
+`ytp-ad-module`, `video-ads`, `ytp-ad-player-overlay` all trip the regex. Hiding
+those elements does not skip an ad. It removes the skip button, or leaves a black
+hole where the player controls used to be.
+
+So `content.js` carries a `PROTECTED_HOSTS` list and does nothing at all on those
+hosts. Network rules still apply there — blocking `doubleclick.net` is harmless
+and occasionally helps — but no element is ever hidden, and no Jev call is made.
+Pressing **Judge this page** on one of them says so rather than failing silently.
+
+Actually skipping YouTube ads requires patching the player's JavaScript from a
+content script: intercepting the player response and stripping `adPlacements` and
+`playerAds`, then stubbing the ad-related player APIs. That is what uBlock Origin
+does, and it is a permanent arms race against YouTube's internals — it breaks
+regularly and needs continuous maintenance. It is a different technique, not a
+setting.
+
+Protected hosts: `youtube.com`, `youtu.be`, `youtube-nocookie.com`, `netflix.com`,
+`twitch.tv`, `vimeo.com`, `disneyplus.com`, `primevideo.com`, `hulu.com`,
+`dailymotion.com`.
+
 ## Known limitations
 
 - **Ad personalisation is not the same as ad removal.** Blocking the ad domain

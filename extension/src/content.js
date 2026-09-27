@@ -25,9 +25,42 @@
     "[aria-label='advertisement']",
   ];
 
-  // Whole-segment matching, so "download" and "shadow" do not trip it.
-  const AD_HINT =
-    /(^|[-_])(ad|ads|advert|advertisement|sponsor|sponsored|dfp|gpt|preroll|interstitial)([-_]|$)/i;
+// Whole-segment matching, so "download" and "shadow" do not trip it.
+const AD_HINT =
+  /(^|[-_])(ad|ads|advert|advertisement|sponsor|sponsored|dfp|gpt|preroll|interstitial)([-_]|$)/i;
+
+/**
+ * Sites the cosmetic layer must not touch.
+ *
+ * Video sites serve their ads from the same hosts as the video itself, so a
+ * domain blocklist cannot reach them -- blocking `googlevideo.com` would break
+ * playback rather than remove an ad. Their ad UI also lives inside the player's
+ * own DOM, where hiding an element does not skip the ad: it removes the skip
+ * button, or leaves a black hole where the player controls were.
+ *
+ * Note that AD_HINT *does* match these internals -- `ytp-ad-skip-button`,
+ * `ytp-ad-module`, `video-ads` all trip it. That is precisely why the guard
+ * exists. Blocking YouTube ads needs player-level script patching, which is a
+ * different technique with a permanent maintenance cost; pretending otherwise
+ * is worse than declining.
+ */
+const PROTECTED_HOSTS = [
+  "youtube.com",
+  "youtu.be",
+  "youtube-nocookie.com",
+  "netflix.com",
+  "twitch.tv",
+  "vimeo.com",
+  "disneyplus.com",
+  "primevideo.com",
+  "hulu.com",
+  "dailymotion.com",
+];
+
+function isProtectedHost(host = location.hostname) {
+  const h = String(host || "").toLowerCase();
+  return PROTECTED_HOSTS.some((p) => h === p || h.endsWith(`.${p}`));
+}
 
   let settings = null;
   let passes = 0;
@@ -209,6 +242,11 @@
   }
 
   async function runJevPass({ force = false } = {}) {
+    // Checked first, so an explicit "Judge this page" click on YouTube reports
+    // why nothing happened instead of silently doing nothing.
+    if (isProtectedHost()) {
+      return { skipped: "protected-site" };
+    }
     if (!settings || !settings.enabled || !settings.jevEnabled) {
       return { skipped: "disabled" };
     }
@@ -308,6 +346,12 @@
   async function init() {
     settings = await safeSend({ type: "settings:get" });
     if (!settings || !settings.enabled) return;
+
+    // On video sites only the network rules apply. See PROTECTED_HOSTS.
+    if (isProtectedHost()) {
+      console.info(LOG, `leaving ${location.hostname} alone: player internals are not ours to hide`);
+      return;
+    }
 
     injectStyle();
 

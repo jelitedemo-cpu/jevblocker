@@ -69,6 +69,12 @@ el.judge.addEventListener("click", async () => {
 
     if (!response) {
       say("No response from the page.");
+    } else if (response.skipped === "protected-site") {
+      say(
+        "This is a video site, so it is left alone. Its ads are inside the " +
+          "video stream — hiding elements here would break the player and " +
+          "remove the skip button, not the ad."
+      );
     } else if (response.skipped === "missing-api-key") {
       say("Add your Jev API key in Settings first.");
     } else if (response.skipped === "disabled") {
