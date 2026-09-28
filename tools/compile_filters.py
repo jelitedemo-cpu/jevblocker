@@ -43,6 +43,13 @@ LISTS = [
     ("easyprivacy", "https://easylist.to/easylist/easyprivacy.txt"),
 ]
 
+# Sent with every list download. The default urllib agent is rejected by the
+# easylist.to CDN with HTTP 403; see fetch().
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
+
 # Rules per emitted ruleset. Small enough that losing one from the end costs
 # little, large enough to stay well under the 100-ruleset manifest ceiling.
 CHUNK_SIZE = 12_000
@@ -379,8 +386,12 @@ def fetch(name: str, url: str, allow_download: bool) -> str:
     if not allow_download:
         raise SystemExit(f"No cached copy of {name} and --no-download was given.")
 
+    # easylist.to sits behind Cloudflare, which returns 403 to urllib's default
+    # `Python-urllib/3.x` User-Agent. curl is served fine, so the block is on the
+    # agent string alone. Send a plain browser UA so the download is not refused.
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     print(f"  {name:<14} fetching ...", end="", flush=True)
-    with urllib.request.urlopen(url, timeout=120) as response:
+    with urllib.request.urlopen(request, timeout=120) as response:
         text = response.read().decode("utf-8", errors="replace")
     path.write_text(text, encoding="utf-8")
     print(f"\r  {name:<14} fetched  {len(text) // 1024:>6} KB")
