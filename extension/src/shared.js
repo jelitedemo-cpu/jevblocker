@@ -13,6 +13,12 @@ export const DEFAULT_SETTINGS = {
   // own switch, separate from the always-safe domain-scoped selectors.
   cosmeticGeneric: true,
 
+  // YouTube needs a completely different technique from everything above --
+  // patching the player rather than hiding an element. See src/youtube.js. It
+  // is off by default because, unlike the cosmetic layers, it depends on
+  // YouTube's internal field names and will need maintenance as they change.
+  blockYoutubeAds: true,
+
   jevEnabled: false,
   jevApiKey: "",
   jevModel: "jev-latest",

@@ -15,6 +15,21 @@ const BADGE_FLUSH_MS = 1500;
 // whatever budget is actually available rather than all-or-nothing.
 const FILTER_RULESETS = Object.keys(RULESET_SIZES);
 const COSMETIC_SCRIPT_ID = "jev-cosmetic-generic";
+const YOUTUBE_SCRIPT_ID = "jev-youtube";
+
+// YouTube ads cannot be handled by any of the layers above -- see
+// src/youtube.js for why. They need the page's own `window.fetch` patched, and
+// a content script in Chrome's default isolated world cannot reach it. The only
+// way in is `chrome.scripting.registerContentScripts` with `world: "MAIN"`,
+// which is why this is registered dynamically from the worker rather than
+// declared in the manifest.
+const YOUTUBE_MATCHES = [
+  "https://www.youtube.com/*",
+  "https://youtube.com/*",
+  "https://m.youtube.com/*",
+  "https://music.youtube.com/*",
+  "https://www.youtube-nocookie.com/*",
+];
 
 const pending = { ...EMPTY_STATS };
 let flushTimer = null;
@@ -143,39 +158,101 @@ async function applyRulesets(settings) {
  * in the manifest so it can be switched off. It applies to every site, so it is
  * the one component a user is likely to want to disable.
  */
+const COSMETIC_SCRIPT_DEFINITION = {
+  id: COSMETIC_SCRIPT_ID,
+  matches: ["http://*/*", "https://*/*"],
+  css: ["cosmetic/generic.css"],
+  runAt: "document_start",
+  allFrames: false,
+};
+
+/** Chrome raises this when a registration with the same id already exists. */
+function isDuplicateScriptId(error) {
+  return /duplicate script id/i.test(String(error?.message || error));
+}
+
 async function applyCosmeticScript(settings) {
   const wanted = Boolean(
     settings.enabled && settings.cosmeticSelectors && settings.cosmeticGeneric
   );
 
-  let registered = [];
+  let isOn = false;
   try {
-    registered = await chrome.scripting.getRegisteredContentScripts({
+    const registered = await chrome.scripting.getRegisteredContentScripts({
       ids: [COSMETIC_SCRIPT_ID],
     });
+    isOn = registered.length > 0;
   } catch (error) {
     console.error("[jev] could not read registered scripts", error);
     return;
   }
 
-  const isOn = registered.length > 0;
+  if (wanted === isOn) return;
 
   try {
-    if (wanted && !isOn) {
-      await chrome.scripting.registerContentScripts([
-        {
-          id: COSMETIC_SCRIPT_ID,
-          matches: ["http://*/*", "https://*/*"],
-          css: ["cosmetic/generic.css"],
-          runAt: "document_start",
-          allFrames: false,
-        },
-      ]);
-    } else if (!wanted && isOn) {
+    if (wanted) {
+      await chrome.scripting.registerContentScripts([COSMETIC_SCRIPT_DEFINITION]);
+    } else {
       await chrome.scripting.unregisterContentScripts({ ids: [COSMETIC_SCRIPT_ID] });
     }
   } catch (error) {
+    // A registration outlives the service worker, and the read above is not
+    // guaranteed to have seen one made moments ago. "Duplicate script ID" then
+    // means the state we wanted is already in place -- not a failure.
+    if (isDuplicateScriptId(error)) return;
     console.error("[jev] could not update the cosmetic stylesheet", error);
+  }
+}
+
+// ---------------------------------------------------------------- youtube
+
+/**
+ * The YouTube player patcher, registered for the main world.
+ *
+ * `world: "MAIN"` is the whole point: the patcher has to replace the page's own
+ * `window.fetch` so it can clean the player response before the player reads it.
+ * A script in the default isolated world gets its own `fetch` and would be
+ * patching a copy that nothing calls -- it would look like it worked and do
+ * nothing, which is the worst possible outcome.
+ *
+ * `runAt: "document_start"` is just as important. The player response arrives
+ * early and is cached by the player, so a hook installed after it lands misses
+ * the first -- and on a normal page load, usually the only -- player request.
+ */
+const YOUTUBE_SCRIPT_DEFINITION = {
+  id: YOUTUBE_SCRIPT_ID,
+  matches: YOUTUBE_MATCHES,
+  js: ["src/youtube.js"],
+  runAt: "document_start",
+  world: "MAIN",
+  allFrames: false,
+};
+
+async function applyYoutubeScript(settings) {
+  const wanted = Boolean(settings.enabled && settings.blockYoutubeAds);
+
+  let isOn = false;
+  try {
+    const registered = await chrome.scripting.getRegisteredContentScripts({
+      ids: [YOUTUBE_SCRIPT_ID],
+    });
+    isOn = registered.length > 0;
+  } catch (error) {
+    console.error("[jev] could not read registered scripts", error);
+    return;
+  }
+
+  if (wanted === isOn) return;
+
+  try {
+    if (wanted) {
+      await chrome.scripting.registerContentScripts([YOUTUBE_SCRIPT_DEFINITION]);
+    } else {
+      await chrome.scripting.unregisterContentScripts({ ids: [YOUTUBE_SCRIPT_ID] });
+    }
+  } catch (error) {
+    if (isDuplicateScriptId(error)) return;
+    console.error("[jev] could not update the YouTube patcher", error);
   }
 }
 
@@ -230,11 +307,37 @@ async function handleCosmeticGet({ host }) {
   return { selectors: selectorsForHost(map, host) };
 }
 
-async function syncFromSettings() {
-  const settings = await getSettings();
-  await applyRulesets(settings);
-  await applyCosmeticScript(settings);
-  await updateBadge();
+// A settings change reaches us from four places at once -- onInstalled,
+// onStartup, storage.onChanged (which onInstalled itself triggers by writing
+// the defaults) and the module-level call at the bottom of this file. Each one
+// ends in read-then-writing Chrome's ruleset and content-script state, so
+// overlapping runs all read "not registered yet" and all try to register; every
+// run after the first then throws "Duplicate script ID". Chaining the runs
+// means each read sees the previous write.
+let syncChain = Promise.resolve();
+let syncQueued = false;
+
+function syncFromSettings() {
+  // Collapse a burst of requests into one pending run. A request that arrives
+  // while a run is in flight still queues another, so the newest settings are
+  // always the ones left applied.
+  if (syncQueued) return syncChain;
+  syncQueued = true;
+
+  const run = async () => {
+    syncQueued = false;
+    const settings = await getSettings();
+    await applyRulesets(settings);
+    await applyCosmeticScript(settings);
+    await applyYoutubeScript(settings);
+    await updateBadge();
+  };
+
+  syncChain = syncChain.then(run, run).catch((error) => {
+    // Keep the chain alive: one failure must not wedge every later sync.
+    console.error("[jev] settings sync failed", error);
+  });
+  return syncChain;
 }
 
 async function handleJudge({ state, questions }) {

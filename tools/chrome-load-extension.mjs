@@ -488,25 +488,38 @@ function expectedSizes() {
 const ACCOUNTING_EXPRESSION = `(async () => {
   const dnr = chrome.declarativeNetRequest;
   // getAvailableStaticRuleCount() does not necessarily reflect an
-  // updateEnabledRulesets() call immediately. Without this settle, readings are
-  // taken mid-update and rules appear to be missing when they are not.
-  const settle = () => new Promise((r) => setTimeout(r, 80));
+  // updateEnabledRulesets() call immediately. A fixed sleep is not enough: at
+  // 80ms this read the *pre-disable* budget on roughly one run in four, which
+  // made every subsequent delta come out negative (0, -12000, -24000, ...) and
+  // reported a total of -887,412 rules. Polling until two consecutive reads
+  // agree ties the measurement to the state actually being applied, instead of
+  // to a guess about how long that takes.
+  const pause = () => new Promise((r) => setTimeout(r, 60));
+  const stable = async () => {
+    let previous = await dnr.getAvailableStaticRuleCount();
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      await pause();
+      const current = await dnr.getAvailableStaticRuleCount();
+      if (current === previous) return current;
+      previous = current;
+    }
+    return previous;
+  };
+
   const enabled = await dnr.getEnabledRulesets();
 
   await dnr.updateEnabledRulesets({ disableRulesetIds: enabled });
-  await settle();
-  const allOff = await dnr.getAvailableStaticRuleCount();
+  const allOff = await stable();
 
   const sizes = {};
   const errors = {};
   for (const id of enabled) {
     try {
       await dnr.updateEnabledRulesets({ enableRulesetIds: [id] });
-      await settle();
-      const withIt = await dnr.getAvailableStaticRuleCount();
+      const withIt = await stable();
       sizes[id] = allOff - withIt;
       await dnr.updateEnabledRulesets({ disableRulesetIds: [id] });
-      await settle();
+      await stable();
     } catch (e) {
       errors[id] = String(e && e.message || e);
     }
@@ -514,8 +527,7 @@ const ACCOUNTING_EXPRESSION = `(async () => {
 
   // Put everything back the way it was.
   await dnr.updateEnabledRulesets({ enableRulesetIds: enabled });
-  await settle();
-  const available = await dnr.getAvailableStaticRuleCount();
+  const available = await stable();
 
   return JSON.stringify({ enabled, sizes, errors, available, allOff });
 })()`;
@@ -534,6 +546,22 @@ async function verifyAccounting(cdp, targetId, expected) {
   }
 
   const report = JSON.parse(result.value);
+
+  // A ruleset cannot hold a negative number of rules. If one does, the budget
+  // counter was read mid-update and the numbers below are meaningless -- say so
+  // loudly rather than reporting a phantom ruleset failure.
+  const bogus = report.enabled.filter(
+    (id) => typeof report.sizes[id] === "number" && report.sizes[id] < 0
+  );
+  if (bogus.length > 0) {
+    console.log(
+      `\n  MEASUREMENT FAULT: ${bogus.length} ruleset(s) reported a negative size, ` +
+        "which is impossible.\n  The verifier raced Chrome's budget counter; this says " +
+        "nothing about the extension. Re-run.\n"
+    );
+    return false;
+  }
+
   let failures = 0;
   let total = 0;
 
@@ -574,6 +602,118 @@ async function verifyAccounting(cdp, targetId, expected) {
   }
 
   return failures === 0;
+}
+
+/**
+ * Reproduces the settings-sync race behind
+ *   "Duplicate script ID 'jev-cosmetic-generic'".
+ *
+ * A settings change reaches the service worker from four places at once --
+ * onInstalled, onStartup, storage.onChanged, and the module-level call -- so
+ * several syncs overlap and every one of them reads Chrome's content-script
+ * state before any of them writes it. The burst below recreates that overlap on
+ * demand rather than waiting for an install to happen to hit it.
+ *
+ * console.error is patched for the duration because this failure is reported
+ * through console.error rather than thrown.
+ */
+const RACE_EXPRESSION = `(async () => {
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => {
+    errors.push(args.map((a) => (a && a.message) || String(a)).join(" "));
+    original.apply(console, args);
+  };
+
+  let backup = null;
+  let hadSettings = false;
+  try {
+    const stored = await chrome.storage.local.get("settings");
+    hadSettings = Object.prototype.hasOwnProperty.call(stored, "settings");
+    // Restored below: this must not be destructive when run against a real
+    // profile, and a partial write would otherwise drop the user's options.
+    backup = hadSettings ? JSON.parse(JSON.stringify(stored.settings)) : null;
+
+    const base = stored.settings || {};
+
+    // Turn the stylesheet off first. The race only exists while the script is
+    // absent -- every overlapping run reads "not registered" and then tries to
+    // register -- so a burst against an already-registered script would pass
+    // even on the broken code and prove nothing.
+    await chrome.storage.local.set({
+      settings: { ...base, cosmeticGeneric: false },
+    });
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Six overlapping changes that all want it back on.
+    errors.length = 0;
+    await Promise.all(
+      Array.from({ length: 6 }, (_, i) =>
+        chrome.storage.local.set({
+          settings: { ...base, cosmeticGeneric: true, jevMinIntervalMs: 1000 + i },
+        })
+      )
+    );
+    await new Promise((r) => setTimeout(r, 2500));
+
+    if (hadSettings) await chrome.storage.local.set({ settings: backup });
+    else await chrome.storage.local.remove("settings");
+    await new Promise((r) => setTimeout(r, 800));
+  } finally {
+    console.error = original;
+  }
+
+  let registered = null;
+  try {
+    const found = await chrome.scripting.getRegisteredContentScripts({
+      ids: ["jev-cosmetic-generic"],
+    });
+    registered = found.length;
+  } catch (e) {
+    registered = "error: " + e.message;
+  }
+
+  const duplicates = errors.filter((e) => /duplicate script id/i.test(e));
+  return JSON.stringify({
+    registered,
+    duplicateErrors: duplicates.length,
+    otherErrors: errors.length - duplicates.length,
+    sample: errors.slice(0, 2),
+  });
+})()`;
+
+async function verifySettingsRace(cdp, targetId) {
+  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+  const { result } = await cdp.send(
+    "Runtime.evaluate",
+    { expression: RACE_EXPRESSION, awaitPromise: true, returnByValue: true },
+    sessionId
+  );
+
+  if (!result?.value) {
+    console.log(`  FAIL could not run the race check: ${result?.description || "no value"}`);
+    return false;
+  }
+
+  const report = JSON.parse(result.value);
+  const noDuplicates = report.duplicateErrors === 0;
+  const registeredOnce = report.registered === 1;
+
+  console.log(
+    `  ${noDuplicates ? "ok  " : "FAIL"} six overlapping settings changes raise no error` +
+      (noDuplicates
+        ? report.otherErrors
+          ? `  (${report.otherErrors} other error(s))`
+          : ""
+        : `  (${report.duplicateErrors} duplicate-id error(s))`)
+  );
+  console.log(
+    `  ${registeredOnce ? "ok  " : "FAIL"} cosmetic script registered exactly once` +
+      ` (${report.registered})`
+  );
+  for (const line of report.sample || []) console.log(`        ${line}`);
+
+  return noDuplicates && registeredOnce;
 }
 
 async function main() {
@@ -681,6 +821,9 @@ async function main() {
     console.log("\nRule checks (asked of Chrome, not assumed):\n");
     const rulesOk = await verifyRules(cdp, worker.targetId);
 
+    console.log("\nSettings sync (overlapping changes):\n");
+    const raceOk = await verifySettingsRace(cdp, worker.targetId);
+
     console.log("\nCosmetic filtering (site-specific rules):\n");
     const domainOk = probe.domain
       ? await runCosmeticDomainCheck(cdp, probe.domain, probe.domainSelector)
@@ -693,7 +836,7 @@ async function main() {
     console.log("\nEnd-to-end (real navigation against a local server):\n");
     const e2eOk = await runEndToEnd(cdp, probe);
 
-    const passed = accountingOk && rulesOk && domainOk && e2eOk;
+    const passed = accountingOk && rulesOk && raceOk && domainOk && e2eOk;
     if (!passed) process.exitCode = 1;
 
     if (captureLog && logLines.length) {

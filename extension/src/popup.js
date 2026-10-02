@@ -55,14 +55,16 @@ async function render() {
   el.hidden.textContent = formatCount(stats.hidden + stats.jevHidden);
   el.jev.textContent = formatCount(stats.jevCalls);
 
+  const youtubeNote = settings.blockYoutubeAds ? " YouTube ad skipping on." : "";
+
   if (!settings.enabled) {
     el.status.textContent = "Protection is off.";
   } else if (settings.jevEnabled && !settings.jevApiKey) {
     el.status.textContent = "Blocklists active. Add a Jev API key in Settings.";
   } else if (settings.jevEnabled) {
-    el.status.textContent = `Blocklists active. Jev judging at ${settings.jevThreshold} confidence.`;
+    el.status.textContent = `Blocklists active. Jev judging at ${settings.jevThreshold} confidence.${youtubeNote}`;
   } else {
-    el.status.textContent = "Blocklists active. Jev judging is off.";
+    el.status.textContent = `Blocklists active. Jev judging is off.${youtubeNote}`;
   }
 
   el.judge.disabled = !settings.jevEnabled;
