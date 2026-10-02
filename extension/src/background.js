@@ -15,20 +15,22 @@ const BADGE_FLUSH_MS = 1500;
 // whatever budget is actually available rather than all-or-nothing.
 const FILTER_RULESETS = Object.keys(RULESET_SIZES);
 const COSMETIC_SCRIPT_ID = "jev-cosmetic-generic";
-const YOUTUBE_SCRIPT_ID = "jev-youtube";
 
-// YouTube ads cannot be handled by any of the layers above -- see
-// src/youtube.js for why. They need the page's own `window.fetch` patched, and
-// a content script in Chrome's default isolated world cannot reach it. The only
-// way in is `chrome.scripting.registerContentScripts` with `world: "MAIN"`,
-// which is why this is registered dynamically from the worker rather than
-// declared in the manifest.
-const YOUTUBE_MATCHES = [
-  "https://www.youtube.com/*",
-  "https://youtube.com/*",
-  "https://m.youtube.com/*",
-  "https://music.youtube.com/*",
-  "https://www.youtube-nocookie.com/*",
+// Every main-world registration is named `jev-mainworld-*`, so they can be
+// diffed and cleaned up as one family. Which groups exist, and which hosts each
+// covers, comes from filters/scriptlets.txt via tools/compile_scriptlets.py --
+// not from this file. That indirection is the point: adding or fixing a rule is
+// a filter-list edit, not a code change.
+const MAIN_WORLD_PREFIX = "jev-mainworld-";
+
+// The supplements script covers the two jobs a scriptlet cannot: rewriting the
+// inline player response, and ending an ad already in flight. See src/youtube.js.
+const YOUTUBE_SUPPLEMENT_ID = `${MAIN_WORLD_PREFIX}youtube-supplement`;
+const YOUTUBE_SUPPLEMENT_MATCHES = [
+  "*://youtube.com/*",
+  "*://*.youtube.com/*",
+  "*://youtube-nocookie.com/*",
+  "*://*.youtube-nocookie.com/*",
 ];
 
 const pending = { ...EMPTY_STATS };
@@ -204,55 +206,106 @@ async function applyCosmeticScript(settings) {
   }
 }
 
-// ---------------------------------------------------------------- youtube
+// ---------------------------------------------------------------- scriptlets
+
+let scriptletGroups = null;
 
 /**
- * The YouTube player patcher, registered for the main world.
+ * The compiled scriptlet groups, read once and kept in memory.
  *
- * `world: "MAIN"` is the whole point: the patcher has to replace the page's own
- * `window.fetch` so it can clean the player response before the player reads it.
- * A script in the default isolated world gets its own `fetch` and would be
- * patching a copy that nothing calls -- it would look like it worked and do
- * nothing, which is the worst possible outcome.
- *
- * `runAt: "document_start"` is just as important. The player response arrives
- * early and is cached by the player, so a hook installed after it lands misses
- * the first -- and on a normal page load, usually the only -- player request.
+ * Small (a few hundred bytes today), so unlike cosmetic/domains.json there is
+ * no cost to holding it.
  */
-const YOUTUBE_SCRIPT_DEFINITION = {
-  id: YOUTUBE_SCRIPT_ID,
-  matches: YOUTUBE_MATCHES,
-  js: ["src/youtube.js"],
-  runAt: "document_start",
-  world: "MAIN",
-  allFrames: false,
-};
-
-async function applyYoutubeScript(settings) {
-  const wanted = Boolean(settings.enabled && settings.blockYoutubeAds);
-
-  let isOn = false;
+async function loadScriptletGroups() {
+  if (scriptletGroups) return scriptletGroups;
   try {
-    const registered = await chrome.scripting.getRegisteredContentScripts({
-      ids: [YOUTUBE_SCRIPT_ID],
+    const response = await fetch(chrome.runtime.getURL("scriptlets/config.json"));
+    const data = await response.json();
+    scriptletGroups = Array.isArray(data?.groups) ? data.groups : [];
+  } catch (error) {
+    console.error("[jev] could not read the scriptlet config", error);
+    scriptletGroups = [];
+  }
+  return scriptletGroups;
+}
+
+/**
+ * Registers the main-world scripts: one content script per scriptlet group,
+ * plus the YouTube supplements.
+ *
+ * `world: "MAIN"` is load-bearing and cannot be declared in the manifest. A
+ * scriptlet has to replace the page's own `window.fetch` and `JSON.parse`; in
+ * Chrome's default isolated world it would get its own copies and patch
+ * something nothing calls -- which looks like it works and does nothing.
+ *
+ * `runAt: "document_start"` matters just as much. The page's inline
+ * `ytInitialPlayerResponse` and its first player request both land within the
+ * first few milliseconds, so a hook installed at document_idle misses the only
+ * response there is to clean.
+ *
+ * A group's config file is listed before the engine so `window.__jevScriptlets`
+ * is set by the time the engine reads it; `files` run in order.
+ */
+async function applyMainWorldScripts(settings) {
+  const on = Boolean(settings.enabled && settings.blockYoutubeAds);
+
+  const wanted = [];
+  if (on) {
+    const groups = await loadScriptletGroups();
+    for (const group of groups) {
+      wanted.push({
+        id: MAIN_WORLD_PREFIX + group.id,
+        matches: group.matches,
+        js: [group.file, "src/scriptlets.js"],
+      });
+    }
+    wanted.push({
+      id: YOUTUBE_SUPPLEMENT_ID,
+      matches: YOUTUBE_SUPPLEMENT_MATCHES,
+      js: ["src/youtube.js"],
     });
-    isOn = registered.length > 0;
+  }
+
+  const wantedIds = new Set(wanted.map((entry) => entry.id));
+
+  let registered;
+  try {
+    registered = await chrome.scripting.getRegisteredContentScripts();
   } catch (error) {
     console.error("[jev] could not read registered scripts", error);
     return;
   }
 
-  if (wanted === isOn) return;
+  const currentIds = registered
+    .map((script) => script.id)
+    .filter((id) => id.startsWith(MAIN_WORLD_PREFIX));
+
+  const toRemove = currentIds.filter((id) => !wantedIds.has(id));
+  const toAdd = wanted.filter((entry) => !currentIds.includes(entry.id));
+
+  if (toRemove.length === 0 && toAdd.length === 0) return;
 
   try {
-    if (wanted) {
-      await chrome.scripting.registerContentScripts([YOUTUBE_SCRIPT_DEFINITION]);
-    } else {
-      await chrome.scripting.unregisterContentScripts({ ids: [YOUTUBE_SCRIPT_ID] });
+    if (toRemove.length > 0) {
+      await chrome.scripting.unregisterContentScripts({ ids: toRemove });
+    }
+    if (toAdd.length > 0) {
+      await chrome.scripting.registerContentScripts(
+        toAdd.map((entry) => ({
+          id: entry.id,
+          matches: entry.matches,
+          js: entry.js,
+          runAt: "document_start",
+          world: "MAIN",
+          allFrames: false,
+        }))
+      );
     }
   } catch (error) {
+    // A registration outlives the service worker, so a read taken moments ago
+    // may not have seen one just made. That is the state we wanted anyway.
     if (isDuplicateScriptId(error)) return;
-    console.error("[jev] could not update the YouTube patcher", error);
+    console.error("[jev] could not update the main-world registrations", error);
   }
 }
 
@@ -329,7 +382,7 @@ function syncFromSettings() {
     const settings = await getSettings();
     await applyRulesets(settings);
     await applyCosmeticScript(settings);
-    await applyYoutubeScript(settings);
+    await applyMainWorldScripts(settings);
     await updateBadge();
   };
 

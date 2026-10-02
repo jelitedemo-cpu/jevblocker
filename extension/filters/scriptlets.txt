@@ -1,0 +1,34 @@
+! Jev Blocker scriptlet rules.
+!
+! Syntax is uBlock Origin / Brave compatible, so rules can be lifted from the
+! community lists unchanged and dropped in here.
+!
+!   domain1,domain2##+js(scriptlet-name, arg1 arg2, arg3)
+!
+! These exist because YouTube is the one site the network and cosmetic layers
+! cannot help. Ads come from the same hosts as the video, and the ad data is
+! handed to the player as part of the player response, so the only place to
+! intervene is between the response arriving and the player reading it.
+!
+! The rules below remove the ad fields from that response. `json-prune` covers
+! `JSON.parse` and `Response.json`; YouTube uses `fetch` for the player call, so
+! the `-fetch-response` variant is the one that actually fires in practice. The
+! XHR variant is kept because the player falls back to XHR on some surfaces.
+!
+! Compiled by tools/compile_scriptlets.py into extension/scriptlets/.
+
+! --- YouTube -----------------------------------------------------------------
+!
+! Fields, and why each one is listed:
+!   adPlacements             the pre-roll / mid-roll slots themselves
+!   playerAds                player-level ad config
+!   adSlots                  older slot list, still present on some surfaces
+!   adParams                 targeting parameters handed to the ad server
+!   adBreakHeartbeatParams   lets the client report ad playback back
+!
+! Removing them leaves the player with nothing to schedule. Playback fields
+! (streamingData, videoDetails) are untouched, so video still plays.
+
+youtube.com,youtube-nocookie.com##+js(json-prune, adPlacements playerAds adSlots adParams adBreakHeartbeatParams playerResponse.adPlacements playerResponse.playerAds)
+youtube.com,youtube-nocookie.com##+js(json-prune-fetch-response, adPlacements playerAds adSlots adParams adBreakHeartbeatParams playerResponse.adPlacements playerResponse.playerAds)
+youtube.com,youtube-nocookie.com##+js(json-prune-xhr-response, adPlacements playerAds adSlots adParams adBreakHeartbeatParams playerResponse.adPlacements playerResponse.playerAds)

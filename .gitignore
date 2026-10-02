@@ -23,3 +23,7 @@ extension/_metadata/
 jev-api-key.txt
 .jev-key
 .cache/
+
+# Byte-compiled output from the tools/ scripts.
+__pycache__/
+*.pyc

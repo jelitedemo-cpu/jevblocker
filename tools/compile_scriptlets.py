@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""
+Compile scriptlet rules into per-host-group configs the extension can load.
+
+This is the Brave-shaped half of the design. The rules live in a text file
+(extension/filters/scriptlets.txt) in uBlock Origin syntax; this turns them into
+(a) a manifest the service worker reads and (b) one config script per group,
+which sets `window.__jevScriptlets` in the page's main world immediately before
+the scriptlet engine runs.
+
+Grouping matters: every distinct scriptlet list becomes one group, so hosts that
+want the same scriptlets share a single registration and a single config file
+rather than one registration per domain.
+
+    python tools/compile_scriptlets.py
+
+Outputs:
+    extension/scriptlets/config.json      groups + match patterns
+    extension/scriptlets/group-<id>.js    window.__jevScriptlets for that group
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / "extension" / "filters" / "scriptlets.txt"
+OUT_DIR = ROOT / "extension" / "scriptlets"
+
+# `domains##+js(name, arg1, arg2)`. The body is split on commas, which is how
+# uBlock separates a scriptlet's arguments; an individual argument may contain
+# spaces (the json-prune property list is exactly that).
+RULE_RE = re.compile(r"^(?P<domains>[^#!\s][^#]*)##\+js\((?P<body>.+)\)$")
+
+# Scriptlets the engine actually implements. A rule naming anything else is
+# dropped with a warning rather than shipped as a no-op -- an unenforced rule
+# that looks enforced is worse than a missing one.
+SUPPORTED = {
+    "json-prune",
+    "json-prune-fetch-response",
+    "json-prune-xhr-response",
+    "set-constant",
+    "set",
+}
+
+
+def parse(path: Path) -> tuple[list[dict], list[str]]:
+    """Returns (rules, warnings)."""
+    rules: list[dict] = []
+    warnings: list[str] = []
+
+    for lineno, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("!") or line.startswith("["):
+            continue
+        # Scriptlet rules only; network and cosmetic syntax belongs elsewhere.
+        if "##+js(" not in line:
+            continue
+
+        match = RULE_RE.match(line)
+        if not match:
+            warnings.append(f"{path.name}:{lineno}: could not parse: {line[:70]}")
+            continue
+
+        domains = [d.strip().lower() for d in match.group("domains").split(",") if d.strip()]
+        if not domains:
+            warnings.append(f"{path.name}:{lineno}: rule has no domain")
+            continue
+
+        parts = [p.strip() for p in match.group("body").split(",")]
+        name = parts[0]
+        args = [p for p in parts[1:]]
+
+        if name not in SUPPORTED:
+            warnings.append(f"{path.name}:{lineno}: unsupported scriptlet '{name}' -- dropped")
+            continue
+
+        rules.append({"domains": domains, "name": name, "args": args})
+
+    return rules, warnings
+
+
+def to_match_patterns(domain: str) -> list[str]:
+    """A hostname becomes the Chrome match patterns that cover it.
+
+    `*.example.com` already includes the bare domain, but both are emitted so the
+    intent is obvious when reading config.json.
+    """
+    if domain.startswith("*."):
+        return [f"*://{domain}/*"]
+    return [f"*://{domain}/*", f"*://*.{domain}/*"]
+
+
+def main() -> int:
+    if not SOURCE.exists():
+        print(f"missing {SOURCE.relative_to(ROOT)}", file=sys.stderr)
+        return 1
+
+    rules, warnings = parse(SOURCE)
+
+    for warning in warnings:
+        print(f"  WARNING {warning}")
+
+    if not rules:
+        print("no scriptlet rules found", file=sys.stderr)
+        return 1
+
+    # Group by the *domain set*, merging every scriptlet that applies to it.
+    #
+    # Grouping by scriptlet list instead would emit one registration per rule,
+    # so three rules for the same host would mean three content scripts all
+    # matching youtube.com -- three injections, three config files, and three
+    # separate hooks installed. One registration carrying all three scriptlets
+    # is both cheaper and closer to how Brave wires it.
+    groups: dict[tuple[str, ...], list[dict]] = {}
+    for rule in rules:
+        key = tuple(sorted(rule["domains"]))
+        bucket = groups.setdefault(key, [])
+        entry = {"name": rule["name"], "args": rule["args"]}
+        if entry not in bucket:
+            bucket.append(entry)
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Remove stale groups so a deleted rule cannot linger in the extension.
+    for old in OUT_DIR.glob("group-*.js"):
+        old.unlink()
+
+    manifest_groups = []
+    for index, (domains, scriptlets) in enumerate(groups.items(), start=1):
+        group_id = f"g{index}"
+        filename = f"group-{group_id}.js"
+
+        payload = json.dumps(scriptlets, separators=(",", ":"))
+        (OUT_DIR / filename).write_text(
+            "// Generated by tools/compile_scriptlets.py -- do not edit by hand.\n"
+            "// Read by src/scriptlets.js, which runs immediately after this file.\n"
+            f"window.__jevScriptlets = {payload};\n",
+            encoding="utf-8",
+        )
+
+        matches: list[str] = []
+        for domain in domains:
+            for pattern in to_match_patterns(domain):
+                if pattern not in matches:
+                    matches.append(pattern)
+
+        manifest_groups.append(
+            {
+                "id": group_id,
+                "file": f"scriptlets/{filename}",
+                "matches": matches,
+                "scriptlets": scriptlets,
+            }
+        )
+
+    (OUT_DIR / "config.json").write_text(
+        json.dumps({"groups": manifest_groups}, indent=2) + "\n", encoding="utf-8"
+    )
+
+    print("")
+    print("Scriptlets")
+    print(f"  rules parsed      {len(rules):>6}")
+    print(f"  groups            {len(manifest_groups):>6}")
+    for group in manifest_groups:
+        names = ", ".join(sorted({s["name"] for s in group["scriptlets"]}))
+        print(f"      {group['id']:<4} {len(group['matches']):>2} patterns   {names}")
+    print(f"  output            extension/scriptlets/")
+    print("")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

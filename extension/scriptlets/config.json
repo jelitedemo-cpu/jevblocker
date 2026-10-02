@@ -1,0 +1,34 @@
+{
+  "groups": [
+    {
+      "id": "g1",
+      "file": "scriptlets/group-g1.js",
+      "matches": [
+        "*://youtube-nocookie.com/*",
+        "*://*.youtube-nocookie.com/*",
+        "*://youtube.com/*",
+        "*://*.youtube.com/*"
+      ],
+      "scriptlets": [
+        {
+          "name": "json-prune",
+          "args": [
+            "adPlacements playerAds adSlots adParams adBreakHeartbeatParams playerResponse.adPlacements playerResponse.playerAds"
+          ]
+        },
+        {
+          "name": "json-prune-fetch-response",
+          "args": [
+            "adPlacements playerAds adSlots adParams adBreakHeartbeatParams playerResponse.adPlacements playerResponse.playerAds"
+          ]
+        },
+        {
+          "name": "json-prune-xhr-response",
+          "args": [
+            "adPlacements playerAds adSlots adParams adBreakHeartbeatParams playerResponse.adPlacements playerResponse.playerAds"
+          ]
+        }
+      ]
+    }
+  ]
+}

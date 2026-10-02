@@ -1,29 +1,38 @@
 #!/usr/bin/env node
 /**
- * Verifies the YouTube ad patcher actually reaches the page's main world.
+ * Verifies the YouTube ad blocking pipeline in a real Chrome.
  *
  *   node tools/check-youtube.mjs
  *
- * Three things worth proving, none of which can be checked by reading source:
+ * The pipeline has two halves, and both are covered here:
  *
- *   1. The registration is created the way the patcher needs it -- `world:
- *      "MAIN"` and `runAt: "document_start"`. A content script in Chrome's
- *      default isolated world gets its own `fetch`; patching that would look
- *      like it worked and change nothing.
- *   2. The patched `fetch` in the *page's* world really does rewrite a player
- *      response in flight.
- *   3. A response with nothing to strip comes back byte-identical. Playback
- *      data must survive; a blocker that breaks video is worse than no blocker.
+ *   * the **scriptlet engine** (src/scriptlets.js), driven by rules compiled
+ *     from filters/scriptlets.txt -- this is the Brave-shaped half, and it does
+ *     the work for anything the page obtains through `fetch`, `XHR` or
+ *     `JSON.parse`;
+ *   * the **supplements** (src/youtube.js) -- the inline `ytInitialPlayerResponse`
+ *     trap and the skip-button fallback, which a scriptlet cannot express.
+ *
+ * Neither half can be validated by reading the source, because the whole point
+ * is what the *page* observes. So this asserts against the page's own view:
+ *
+ *   1. the registrations exist with `world: "MAIN"` and `runAt: "document_start"`
+ *      -- in the isolated world every hook would patch a copy nothing calls;
+ *   2. `window.__jevScriptlets` is set before the engine reads it;
+ *   3. a player response fetched by the page comes back with its ad fields gone;
+ *   4. `JSON.parse` sees the same treatment;
+ *   5. the page's own `ytInitialPlayerResponse` assignment is cleaned in flight;
+ *   6. an ad-free response and a non-JSON response are byte-identical.
+ *
+ * (6) is the one that matters most. A blocker that mangles responses it should
+ * not touch breaks sites, and that is worse than an ad.
  *
  * The local server has to speak HTTPS. `youtube.com` is HSTS-preloaded, so
- * Chrome silently rewrites `http://www.youtube.com/...` to `https://` before it
- * ever hits the resolver -- a plain HTTP server is never reached and the page
- * loads as an error document. A self-signed cert plus
- * `--ignore-certificate-errors` gets a real document onto a real youtube.com
- * origin, which is what makes the manifest's match patterns fire.
- *
- * `--host-resolver-rules` then points that name at 127.0.0.1, so the whole path
- * runs end to end without touching the real YouTube.
+ * Chrome rewrites `http://www.youtube.com/...` to `https://` before the resolver
+ * runs -- a plain HTTP server is never reached and the page loads as an error
+ * document. A throwaway cert plus `--ignore-certificate-errors` gets a real
+ * document onto a real youtube.com origin, which is what makes the match
+ * patterns fire. `--host-resolver-rules` then points the name at 127.0.0.1.
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -167,10 +176,26 @@ const CLEAN_RESPONSE = {
   videoDetails: { videoId: "abcdefghijk", title: "A real video" },
 };
 
+// The inline assignment is deliberately at top level, not inside the async
+// function: `var` inside a function would create a local binding and never
+// touch `window`, so it would not exercise the trap at all.
 const PAGE = `<!doctype html><html><head><meta charset="utf-8">
-<title>yt probe</title></head><body>
+<title>yt probe</title>
+<script>
+var ytInitialPlayerResponse = {
+  adPlacements: [{ a: 1 }, { b: 2 }],
+  playerAds: [{}],
+  adParams: "inline=yes",
+  streamingData: { formats: [{ itag: 137, mimeType: "video/mp4" }] },
+  videoDetails: { videoId: "abcdefghijk", title: "A real video" }
+};
+</script>
+</head><body>
 <script>
 window.__probe = { done: false };
+window.__probe.scriptletsLoaded = Array.isArray(window.__jevScriptlets);
+window.__probe.inline = window.ytInitialPlayerResponse;
+
 (async () => {
   try {
     const adRes = await fetch("/youtubei/v1/player?probe=ad", { method: "POST" });
@@ -179,18 +204,16 @@ window.__probe = { done: false };
     const cleanRes = await fetch("/youtubei/v1/player?probe=clean", { method: "POST" });
     window.__probe.clean = await cleanRes.json();
 
-    // A non-player URL must pass through untouched.
-    const other = await fetch("/other");
-    window.__probe.other = await other.text();
+    window.__probe.parsed = JSON.parse(
+      '{"adPlacements":[{"x":1}],"playerAds":[{}],"streamingData":{"formats":[{"itag":137}]}}'
+    );
+
+    window.__probe.other = await (await fetch("/other")).text();
   } catch (e) {
     window.__probe.error = String(e);
   }
   window.__probe.done = true;
 })();
-
-// Whether the page sees the patched fetch is the whole point of world:"MAIN".
-window.__probe.fetchPatched = typeof window.fetch === "function" &&
-  String(window.fetch).includes("original.call");
 </script>
 <p>probe</p></body></html>`;
 
@@ -203,20 +226,21 @@ async function main() {
   const server = createServer(
     { key: readFileSync(key), cert: readFileSync(cert) },
     (req, res) => {
-    if (req.url.startsWith("/youtubei/v1/player")) {
-      const body = req.url.includes("probe=ad") ? AD_RESPONSE : CLEAN_RESPONSE;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(body));
-      return;
+      if (req.url.startsWith("/youtubei/v1/player")) {
+        const body = req.url.includes("probe=ad") ? AD_RESPONSE : CLEAN_RESPONSE;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(body));
+        return;
+      }
+      if (req.url === "/other") {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("untouched");
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(PAGE);
     }
-    if (req.url === "/other") {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("untouched");
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(PAGE);
-  });
+  );
 
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const appPort = server.address().port;
@@ -232,9 +256,7 @@ async function main() {
       `--user-data-dir=${profile}`,
       "--no-first-run",
       "--no-default-browser-check",
-      // Accept the throwaway cert so the youtube.com origin resolves.
       "--ignore-certificate-errors",
-      // Point the real name at the local server.
       `--host-resolver-rules=MAP www.youtube.com 127.0.0.1:${appPort}`,
       "about:blank",
     ],
@@ -277,20 +299,34 @@ async function main() {
       {
         expression: `(async () => {
           const scripts = await chrome.scripting.getRegisteredContentScripts();
-          const yt = scripts.find((s) => s.id === "jev-youtube");
-          return JSON.stringify(yt
-            ? { found: true, world: yt.world, runAt: yt.runAt, matches: yt.matches }
-            : { found: false });
+          return JSON.stringify(scripts
+            .filter((s) => s.id.startsWith("jev-mainworld-"))
+            .map((s) => ({ id: s.id, world: s.world, runAt: s.runAt, files: s.js, matches: s.matches.length })));
         })()`,
         awaitPromise: true,
         returnByValue: true,
       },
       swSession
     );
-    const reg = JSON.parse(regResult.value);
-    check("jev-youtube script is registered", reg.found === true);
-    check('registered with world:"MAIN"', reg.world === "MAIN", `got ${reg.world}`);
-    check("registered at document_start", reg.runAt === "document_start", `got ${reg.runAt}`);
+    const regs = JSON.parse(regResult.value);
+    const group = regs.find((r) => r.id === "jev-mainworld-g1");
+    const supplement = regs.find((r) => r.id === "jev-mainworld-youtube-supplement");
+
+    check("scriptlet group is registered", Boolean(group), JSON.stringify(regs.map((r) => r.id)));
+    check("supplements script is registered", Boolean(supplement));
+    check(
+      'group registered with world:"MAIN"',
+      group?.world === "MAIN",
+      `got ${group?.world}`
+    );
+    check("group registered at document_start", group?.runAt === "document_start", `got ${group?.runAt}`);
+    check(
+      "config file is listed before the engine",
+      Array.isArray(group?.files) &&
+        group.files[0].startsWith("scriptlets/") &&
+        group.files[1] === "src/scriptlets.js",
+      JSON.stringify(group?.files)
+    );
 
     await sleep(600);
 
@@ -338,31 +374,61 @@ async function main() {
 
     const ad = probe.ad || {};
     const clean = probe.clean || {};
+    const parsed = probe.parsed || {};
+    const inline = probe.inline || {};
 
-    check("page sees the patched fetch (main world)", probe.fetchPatched === true);
+    check("scriptlet config reached the page", probe.scriptletsLoaded === true);
 
+    // --- scriptlet engine: fetch ------------------------------------------
+    //
+    // json-prune *deletes* the named properties; it does not empty them. That is
+    // uBlock's documented behaviour and it is what the rules here inherit, so
+    // the assertion is absence rather than an empty array. (The supplements
+    // script empties arrays instead -- see the inline checks below -- and both
+    // shapes read as "no ads" to the player.)
     check(
-      "ad response: adPlacements emptied",
-      JSON.stringify(ad.adPlacements) === "[]",
+      "fetch: adPlacements removed",
+      !("adPlacements" in ad),
       `got ${JSON.stringify(ad.adPlacements)}`
     );
     check(
-      "ad response: playerAds emptied",
-      JSON.stringify(ad.playerAds) === "[]",
+      "fetch: playerAds removed",
+      !("playerAds" in ad),
       `got ${JSON.stringify(ad.playerAds)}`
     );
-    check("ad response: adParams removed", !("adParams" in ad), `got ${JSON.stringify(ad.adParams)}`);
+    check("fetch: adParams removed", !("adParams" in ad), `got ${JSON.stringify(ad.adParams)}`);
+    check("fetch: streamingData intact", ad.streamingData?.formats?.[0]?.itag === 137);
+    check("fetch: videoDetails intact", ad.videoDetails?.videoId === "abcdefghijk");
 
-    // The point of all of it: playback data must survive.
-    check("ad response: streamingData intact", ad.streamingData?.formats?.[0]?.itag === 137);
-    check("ad response: videoDetails intact", ad.videoDetails?.videoId === "abcdefghijk");
-
+    // --- scriptlet engine: JSON.parse -------------------------------------
     check(
-      "clean response: ad-free stays ad-free",
+      "JSON.parse: adPlacements removed",
+      !("adPlacements" in parsed),
+      `got ${JSON.stringify(parsed.adPlacements)}`
+    );
+    check("JSON.parse: streamingData intact", parsed.streamingData?.formats?.[0]?.itag === 137);
+
+    // --- supplements: inline trap -----------------------------------------
+    check(
+      "inline ytInitialPlayerResponse: adPlacements emptied",
+      JSON.stringify(inline.adPlacements) === "[]",
+      `got ${JSON.stringify(inline.adPlacements)}`
+    );
+    check(
+      "inline ytInitialPlayerResponse: playerAds emptied",
+      JSON.stringify(inline.playerAds) === "[]",
+      `got ${JSON.stringify(inline.playerAds)}`
+    );
+    check("inline: streamingData intact", inline.streamingData?.formats?.[0]?.itag === 137);
+    check("inline: videoDetails intact", inline.videoDetails?.videoId === "abcdefghijk");
+
+    // --- the safety properties --------------------------------------------
+    check(
+      "ad-free response is byte-identical",
       JSON.stringify(clean) === JSON.stringify(CLEAN_RESPONSE),
       `got ${JSON.stringify(clean)}`
     );
-    check("non-player URL is untouched", probe.other === "untouched", `got ${JSON.stringify(probe.other)}`);
+    check("non-JSON response is untouched", probe.other === "untouched", `got ${JSON.stringify(probe.other)}`);
     check("no page-side error", !probe.error, probe.error || "");
   } finally {
     cdp?.close();
@@ -380,13 +446,13 @@ async function main() {
   }
 
   console.log("");
-  console.log("YouTube ad patcher");
+  console.log("YouTube ad blocking pipeline");
   console.log("");
   for (const line of results) console.log(line);
   console.log("");
   console.log(
     failed === 0
-      ? "PASS - the patcher reaches the page and strips ads without touching playback data."
+      ? "PASS - scriptlets strip the ad fields, the inline response is cleaned in flight,\n       and responses with nothing to strip are untouched."
       : `FAIL - ${failed} check(s) failed.`
   );
   console.log("");
