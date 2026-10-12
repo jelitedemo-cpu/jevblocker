@@ -14,5 +14,5 @@ export const RULESET_SIZES = {
   "filters-07": 12000,
   "filters-08": 12000,
   "filters-09": 12000,
-  "filters-10": 7661,
+  "filters-10": 4139,
 };
