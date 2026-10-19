@@ -29,6 +29,8 @@ import argparse
 import json
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +39,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache" / "lists"
 RULES_DIR = ROOT / "extension" / "rules"
 COSMETIC_DIR = ROOT / "extension" / "cosmetic"
+
+# Transient DNS failures on the list CDN are common; try this many times total.
+DOWNLOAD_ATTEMPTS = 5
 
 LISTS = [
     ("easylist", "https://easylist.to/easylist/easylist.txt"),
@@ -391,8 +396,36 @@ def fetch(name: str, url: str, allow_download: bool) -> str:
     # agent string alone. Send a plain browser UA so the download is not refused.
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     print(f"  {name:<14} fetching ...", end="", flush=True)
-    with urllib.request.urlopen(request, timeout=120) as response:
-        text = response.read().decode("utf-8", errors="replace")
+
+    # DNS for the easylist.to CDN is intermittently unresolvable on this machine
+    # (`getaddrinfo failed` for one host while the next resolves fine), so a
+    # single attempt fails whole runs at random. Retry transient network errors
+    # before giving up; a 4xx/5xx status is not transient and still fails fast.
+    last_error: Exception | None = None
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                text = response.read().decode("utf-8", errors="replace")
+            break
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt == DOWNLOAD_ATTEMPTS:
+                raise SystemExit(
+                    f"Could not download {name} from {url} after "
+                    f"{DOWNLOAD_ATTEMPTS} attempts: {exc}"
+                )
+            delay = min(2 ** (attempt - 1), 10)
+            print(
+                f"\r  {name:<14} retry {attempt}/{DOWNLOAD_ATTEMPTS - 1} "
+                f"in {delay}s ({exc})",
+                end="",
+                flush=True,
+            )
+            time.sleep(delay)
+            print(f"\r  {name:<14} fetching ...", end="", flush=True)
+
     path.write_text(text, encoding="utf-8")
     print(f"\r  {name:<14} fetched  {len(text) // 1024:>6} KB")
     return text
