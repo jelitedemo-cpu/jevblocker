@@ -166,12 +166,20 @@ To do it by hand:
 ```bash
 python tools/compile_filters.py     # re-download and recompile
 node tools/check-regexes.mjs        # must report zero regexFilters
-run-in-chrome.cmd verify            # must pass all four sections
+node tools/check-secrets.mjs --all  # no credentials in any tracked file
+run-in-chrome.cmd verify            # every section must pass
 ```
 
 `compile_filters.py` warns if `manifest.json` does not declare a ruleset it
 generated — a ruleset missing from the manifest never loads and nothing else
 reports it.
+
+**Secrets.** The Jev API key lives in the extension's settings at runtime, and
+in `jev-api-key.txt` while testing. Neither is tracked. `check-secrets.mjs`
+scans staged files for key-shaped strings and refuses the commit; a
+`.git/hooks/pre-commit` runs it, which protects this clone only, because a hook
+is not versioned. Anything committed once should be treated as leaked and
+rotated — rewriting the commit does not un-publish it.
 
 ## Files
 

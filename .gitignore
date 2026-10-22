@@ -24,6 +24,20 @@ jev-api-key.txt
 .jev-key
 .cache/
 
+# Credentials, in the shapes they usually arrive in. jev-api-key.txt above is
+# the one this project actually uses; the rest are here because the accident is
+# always a file nobody planned for. tools/check-secrets.mjs is the backstop for
+# the case a file gets force-added anyway.
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+credentials*.json
+*secret*.json
+
 # Byte-compiled output from the tools/ scripts.
 __pycache__/
 *.pyc
