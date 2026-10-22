@@ -55,10 +55,24 @@ async function render() {
   el.hidden.textContent = formatCount(stats.hidden + stats.jevHidden);
   el.jev.textContent = formatCount(stats.jevCalls);
 
-  const youtubeNote = settings.blockYoutubeAds ? " YouTube ad skipping on." : "";
+  const youtubeNote =
+    settings.youtubeMode === "allow"
+      ? " YouTube is allowlisted, so ads play there."
+      : "";
+
+  // YouTube only reaches this state by refusing to play, which the user has
+  // already noticed by the time they open the popup. Say what happened and
+  // where the switch is, rather than reporting "blocklists active" over a dead
+  // player.
+  const youtubeBlocked =
+    settings.youtubeMode !== "allow" && Number(settings.youtubeDetectedAt) > 0;
 
   if (!settings.enabled) {
     el.status.textContent = "Protection is off.";
+  } else if (youtubeBlocked) {
+    el.status.textContent =
+      "YouTube is refusing to play video because it detected ad blocking. " +
+      "Set YouTube to “Allow” in Settings.";
   } else if (settings.jevEnabled && !settings.jevApiKey) {
     el.status.textContent = "Blocklists active. Add a Jev API key in Settings.";
   } else if (settings.jevEnabled) {

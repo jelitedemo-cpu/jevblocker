@@ -78,19 +78,22 @@
       <section>
         <h2>YouTube</h2>
 
-        <label class="row">
+        <label class="field">
           <span>
-            <strong>Skip YouTube ads</strong>
+            <strong>YouTube</strong>
             <em>
-              Patches the YouTube player so it never schedules an ad, rather
-              than hiding one. This is the only way to remove YouTube ads: they
-              come from the same hosts as the video and are often stitched into
-              the stream itself, so a blocklist cannot reach them. The tradeoff
-              is that it relies on YouTube's internals, so it will occasionally
-              need updating. If it ever stops working, playback is unaffected.
+              YouTube is the only site that actively detects ad blocking and
+              refuses to play the video when it does. "Block ads" is best
+              effort: it usually works, but when YouTube notices you get a dead
+              player and a "violates Terms of Service" card. "Allow" stops
+              touching the site, so the video always plays and the ads are
+              shown. No blocker reliably wins this for long.
             </em>
           </span>
-          <input type="checkbox" id="blockYoutubeAds" />
+          <select id="youtubeMode">
+            <option value="block">Block ads (best effort)</option>
+            <option value="allow">Allow YouTube (playback always works)</option>
+          </select>
         </label>
       </section>
 

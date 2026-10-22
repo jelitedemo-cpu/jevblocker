@@ -7,7 +7,7 @@ const fields = {
   stripTrackingParams: document.getElementById("stripTrackingParams"),
   cosmeticSelectors: document.getElementById("cosmeticSelectors"),
   cosmeticGeneric: document.getElementById("cosmeticGeneric"),
-  blockYoutubeAds: document.getElementById("blockYoutubeAds"),
+  youtubeMode: document.getElementById("youtubeMode"),
   jevEnabled: document.getElementById("jevEnabled"),
   jevApiKey: document.getElementById("jevApiKey"),
   jevModel: document.getElementById("jevModel"),
@@ -31,7 +31,6 @@ const CHECKBOXES = [
   "stripTrackingParams",
   "cosmeticSelectors",
   "cosmeticGeneric",
-  "blockYoutubeAds",
   "jevEnabled",
 ];
 
@@ -49,6 +48,10 @@ function say(text, isError = false) {
 function collect() {
   const patch = {};
   for (const key of CHECKBOXES) patch[key] = fields[key].checked;
+  patch.youtubeMode = fields.youtubeMode.value;
+  // Picking a mode is the user acknowledging the situation, so the "YouTube
+  // blocked playback" notice clears instead of nagging forever.
+  patch.youtubeDetectedAt = 0;
   patch.jevApiKey = fields.jevApiKey.value.trim();
   patch.jevModel = fields.jevModel.value.trim() || "jev-latest";
   patch.jevThreshold = Number(fields.jevThreshold.value);
@@ -61,6 +64,7 @@ async function load() {
   const settings = await getSettings();
 
   for (const key of CHECKBOXES) fields[key].checked = Boolean(settings[key]);
+  fields.youtubeMode.value = settings.youtubeMode === "allow" ? "allow" : "block";
   fields.jevApiKey.value = settings.jevApiKey || "";
   fields.jevModel.value = settings.jevModel || "jev-latest";
   fields.jevThreshold.value = settings.jevThreshold;

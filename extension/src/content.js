@@ -377,6 +377,47 @@ function isProtectedHost(host = location.hostname) {
     return false;
   });
 
+  /**
+   * Notices YouTube's "Ad blockers violate YouTube's Terms of Service" card.
+   *
+   * This is the one failure a user cannot diagnose for themselves: the page is
+   * not broken, it is refusing to play. Reporting it lets the popup name the
+   * cause and point at the switch, instead of the extension looking like it
+   * silently stopped working.
+   *
+   * Matched on the heading text, not a class. The class is an obfuscated build
+   * artifact that changes between deploys; the sentence is the thing YouTube
+   * wants the user to read, so it is the stable part.
+   */
+  function watchForYoutubeEnforcement() {
+    if (!/(^|\.)youtube(-nocookie)?\.com$/.test(location.hostname)) return;
+
+    let reported = false;
+    let lastCheck = 0;
+
+    const check = () => {
+      if (reported) return;
+
+      // The card re-renders constantly while the page settles, and textContent
+      // on a large DOM is not free. Twice a second is plenty.
+      const now = Date.now();
+      if (now - lastCheck < 500) return;
+      lastCheck = now;
+
+      const text = document.body?.textContent;
+      if (!text) return;
+      if (!/ad blockers? violate youtube'?s terms of service/i.test(text)) return;
+
+      reported = true;
+      observer.disconnect();
+      void safeSend({ type: "youtube:detected" });
+    };
+
+    const observer = new MutationObserver(check);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    check();
+  }
+
   async function init() {
     settings = await safeSend({ type: "settings:get" });
     if (!settings || !settings.enabled) return;
@@ -384,6 +425,7 @@ function isProtectedHost(host = location.hostname) {
     // On video sites only the network rules apply. See PROTECTED_HOSTS.
     if (isProtectedHost()) {
       console.info(LOG, `leaving ${location.hostname} alone: player internals are not ours to hide`);
+      watchForYoutubeEnforcement();
       return;
     }
 

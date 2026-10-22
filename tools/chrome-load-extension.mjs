@@ -716,6 +716,165 @@ async function verifySettingsRace(cdp, targetId) {
   return noDuplicates && registeredOnce;
 }
 
+/**
+ * Checks the YouTube allowlist actually does something.
+ *
+ * Switching the mode to "allow" is supposed to install two `allowAllRequests`
+ * dynamic rules and take them away again on the way back. Both halves are
+ * asserted, because the dangerous failure is the second one: leaving the rules
+ * behind means blocking silently stops working on YouTube forever, with nothing
+ * in the UI to show for it.
+ */
+const YOUTUBE_ALLOW_EXPRESSION = `(async () => {
+  const dnr = chrome.declarativeNetRequest;
+  const settle = () => new Promise((r) => setTimeout(r, 600));
+
+  const stored = await chrome.storage.local.get("settings");
+  const had = Object.prototype.hasOwnProperty.call(stored, "settings");
+  const base = stored.settings || {};
+  // Restored at the end: this must not clobber a real profile's options.
+  const backup = had ? JSON.parse(JSON.stringify(stored.settings)) : null;
+
+  const out = {};
+  try {
+    await chrome.storage.local.set({ settings: { ...base, youtubeMode: "allow" } });
+    await settle();
+
+    const rules = (await dnr.getDynamicRules()).filter((r) => r.id === 9001 || r.id === 9002);
+    out.allowRules = rules.length;
+    out.allAllowAllRequests = rules.every((r) => r.action.type === "allowAllRequests");
+
+    const outcome = await dnr.testMatchOutcome({
+      url: "https://www.youtube.com/watch?v=abc",
+      type: "main_frame",
+    });
+    out.allowMatched = (outcome.matchedRules || []).some((m) => m.ruleId === 9001);
+
+    await chrome.storage.local.set({ settings: { ...base, youtubeMode: "block" } });
+    await settle();
+    out.rulesAfterBlock = (await dnr.getDynamicRules())
+      .filter((r) => r.id === 9001 || r.id === 9002).length;
+  } finally {
+    if (had) await chrome.storage.local.set({ settings: backup });
+    else await chrome.storage.local.remove("settings");
+    await settle();
+  }
+
+  return JSON.stringify(out);
+})()`;
+
+async function verifyYoutubeAllowlist(cdp, targetId) {
+  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+  const { result } = await cdp.send(
+    "Runtime.evaluate",
+    { expression: YOUTUBE_ALLOW_EXPRESSION, awaitPromise: true, returnByValue: true },
+    sessionId
+  );
+
+  if (!result?.value) {
+    console.log(`  FAIL could not run the allowlist check: ${result?.description || "no value"}`);
+    return false;
+  }
+
+  const report = JSON.parse(result.value);
+
+  const installed =
+    report.allowRules === 2 && report.allAllowAllRequests && report.allowMatched;
+  const removed = report.rulesAfterBlock === 0;
+
+  console.log(
+    `  ${installed ? "ok  " : "FAIL"} "allow" installs allowAllRequests rules that match YouTube` +
+      (installed ? "" : `  (${report.allowRules} rule(s), matched=${report.allowMatched})`)
+  );
+  console.log(
+    `  ${removed ? "ok  " : "FAIL"} switching back to "block" removes them` +
+      (removed ? "" : `  (${report.rulesAfterBlock} left behind)`)
+  );
+
+  return installed && removed;
+}
+
+/**
+ * Opens the options page and checks the controls the code looks up by id.
+ *
+ * `options.js` resolves every field with getElementById at load time, so a
+ * renamed or mistyped id fails silently: the page renders, saving works, and
+ * that one setting is simply never read or written. Nothing else in the suite
+ * would notice, which is exactly why this check exists.
+ */
+const OPTIONS_EXPRESSION = `(() => {
+  const ids = [
+    "enabled", "blockAds", "blockRedirects", "stripTrackingParams",
+    "cosmeticSelectors", "cosmeticGeneric", "youtubeMode",
+    "jevEnabled", "jevApiKey", "jevModel",
+  ];
+  const missing = ids.filter((id) => !document.getElementById(id));
+  const select = document.getElementById("youtubeMode");
+  return JSON.stringify({
+    href: location.href,
+    missing,
+    youtubeValue: select ? select.value : null,
+    youtubeOptions: select ? [...select.options].map((o) => o.value) : [],
+    hasSave: Boolean(document.getElementById("save")),
+  });
+})()`;
+
+async function verifyOptionsPage(cdp, extensionId) {
+  const { targetId } = await cdp.send("Target.createTarget", {
+    url: `chrome-extension://${extensionId}/src/options.html`,
+  });
+
+  // The page has to finish parsing before the elements exist. createTarget
+  // returns while the target is still on about:blank, so a report is only
+  // accepted once the URL is the options page -- otherwise the empty document
+  // is measured and every control looks missing.
+  let report = null;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline && !report) {
+    try {
+      const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+      const { result } = await cdp.send(
+        "Runtime.evaluate",
+        { expression: OPTIONS_EXPRESSION, returnByValue: true },
+        sessionId
+      );
+      if (result?.value) {
+        const candidate = JSON.parse(result.value);
+        if (String(candidate.href || "").includes("options.html")) report = candidate;
+      }
+    } catch {
+      /* still navigating */
+    }
+    if (!report) await sleep(250);
+  }
+
+  try {
+    await cdp.send("Target.closeTarget", { targetId });
+  } catch {
+    /* already gone */
+  }
+
+  if (!report) {
+    console.log("  FAIL options page did not load");
+    return false;
+  }
+
+  const controlsOk = report.missing.length === 0;
+  const selectOk =
+    report.youtubeValue === "block" || report.youtubeValue === "allow";
+
+  console.log(
+    `  ${controlsOk ? "ok  " : "FAIL"} every control the script looks up exists` +
+      (controlsOk ? "" : `  (missing: ${report.missing.join(", ")})`)
+  );
+  console.log(
+    `  ${selectOk ? "ok  " : "FAIL"} youtube mode select reads a valid value` +
+      (selectOk ? ` (${report.youtubeValue})` : ` (${report.youtubeValue})`)
+  );
+
+  return controlsOk && selectOk;
+}
+
 async function main() {
   if (!existsSync(EXTENSION_DIR)) {
     throw new Error(`extension folder not found: ${EXTENSION_DIR}`);
@@ -824,6 +983,12 @@ async function main() {
     console.log("\nSettings sync (overlapping changes):\n");
     const raceOk = await verifySettingsRace(cdp, worker.targetId);
 
+    console.log("\nYouTube allowlist:\n");
+    const youtubeOk = await verifyYoutubeAllowlist(cdp, worker.targetId);
+
+    console.log("\nOptions page:\n");
+    const optionsOk = await verifyOptionsPage(cdp, loaded.id);
+
     console.log("\nCosmetic filtering (site-specific rules):\n");
     const domainOk = probe.domain
       ? await runCosmeticDomainCheck(cdp, probe.domain, probe.domainSelector)
@@ -836,7 +1001,8 @@ async function main() {
     console.log("\nEnd-to-end (real navigation against a local server):\n");
     const e2eOk = await runEndToEnd(cdp, probe);
 
-    const passed = accountingOk && rulesOk && raceOk && domainOk && e2eOk;
+    const passed =
+      accountingOk && rulesOk && raceOk && youtubeOk && optionsOk && domainOk && e2eOk;
     if (!passed) process.exitCode = 1;
 
     if (captureLog && logLines.length) {

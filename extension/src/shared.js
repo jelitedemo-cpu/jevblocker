@@ -13,11 +13,25 @@ export const DEFAULT_SETTINGS = {
   // own switch, separate from the always-safe domain-scoped selectors.
   cosmeticGeneric: true,
 
-  // YouTube needs a completely different technique from everything above --
-  // patching the player rather than hiding an element. See src/youtube.js. It
-  // is off by default because, unlike the cosmetic layers, it depends on
-  // YouTube's internal field names and will need maintenance as they change.
-  blockYoutubeAds: true,
+  // YouTube is the one site where blocking reliably gets detected, and the
+  // penalty is severe: the video does not play at all, just a "Ad blockers
+  // violate YouTube's Terms of Service" card.
+  //
+  //   "block" -- best effort. Scriptlets strip the ad fields and the player
+  //              guard ends an ad that slips through. Works until YouTube
+  //              notices, then playback stops entirely.
+  //   "allow" -- stop touching the site. Ads play, the video always works.
+  //
+  // This is not a problem that gets solved once. YouTube ships the
+  // countermeasure and every blocker plays catch-up; Adblock Plus and AdBlock
+  // both document "allowlist the site" as the fix, because it is the only one
+  // that stays fixed.
+  youtubeMode: "block",
+
+  // Set when the enforcement screen is actually seen, so the popup can explain
+  // what happened instead of leaving the user with a dead player. Cleared when
+  // the mode changes.
+  youtubeDetectedAt: 0,
 
   jevEnabled: false,
   jevApiKey: "",

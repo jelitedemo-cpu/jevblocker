@@ -1,6 +1,7 @@
 import {
   callJev,
   getSettings,
+  saveSettings,
   getStats,
   setStats,
   EMPTY_STATS,
@@ -247,7 +248,7 @@ async function loadScriptletGroups() {
  * is set by the time the engine reads it; `files` run in order.
  */
 async function applyMainWorldScripts(settings) {
-  const on = Boolean(settings.enabled && settings.blockYoutubeAds);
+  const on = Boolean(settings.enabled && settings.youtubeMode === "block");
 
   const wanted = [];
   if (on) {
@@ -309,6 +310,63 @@ async function applyMainWorldScripts(settings) {
   }
 }
 
+// Dynamic rule ids reserved for the YouTube allowlist. Dynamic rules rather
+// than a static ruleset because this has to change at runtime without a reload.
+const YOUTUBE_ALLOW_RULE_IDS = [9001, 9002];
+
+/**
+ * Exempts YouTube from network blocking when the user has chosen to allow it.
+ *
+ * `allowAllRequests` is the only action that covers a whole page. A plain
+ * `allow` matches a single request; this one matches the top-level document and
+ * everything loaded inside it, which is what is needed -- YouTube's detection
+ * reacts to blocked ad requests anywhere in the page, not to one of them.
+ *
+ * Removing the rules matters as much as adding them. Leaving them behind would
+ * keep exempting YouTube after the user switched back to blocking, and the
+ * symptom would be "blocking is on but ads still play", with nothing to see.
+ */
+async function applyYoutubeAllowRules(settings) {
+  const allow = Boolean(settings.enabled && settings.youtubeMode === "allow");
+
+  let existing = [];
+  try {
+    existing = await chrome.declarativeNetRequest.getDynamicRules();
+  } catch (error) {
+    console.error("[jev] could not read dynamic rules", error);
+    return;
+  }
+
+  const present = existing.filter((rule) => YOUTUBE_ALLOW_RULE_IDS.includes(rule.id));
+  const wantCount = allow ? YOUTUBE_ALLOW_RULE_IDS.length : 0;
+
+  // Nothing to change. This also keeps syncFromSettings from issuing a write on
+  // every settings change, which would otherwise churn the rules on every
+  // keystroke in the options page.
+  if (present.length === wantCount) return;
+
+  const domains = ["youtube.com", "youtube-nocookie.com"];
+
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: YOUTUBE_ALLOW_RULE_IDS,
+      addRules: allow
+        ? domains.map((domain, index) => ({
+            id: YOUTUBE_ALLOW_RULE_IDS[index],
+            priority: 1000,
+            action: { type: "allowAllRequests" },
+            condition: {
+              urlFilter: `||${domain}^`,
+              resourceTypes: ["main_frame"],
+            },
+          }))
+        : [],
+    });
+  } catch (error) {
+    console.error("[jev] could not update the YouTube allowlist", error);
+  }
+}
+
 // ---------------------------------------------------------------- cosmetic lookup
 
 let cosmeticDomains = null;
@@ -360,6 +418,25 @@ async function handleCosmeticGet({ host }) {
   return { selectors: selectorsForHost(map, host) };
 }
 
+/**
+ * Records that YouTube's enforcement screen was actually seen.
+ *
+ * Only stored while blocking is still on: if the user has already allowlisted
+ * the site the notice would be stale the moment it was written. Written once,
+ * because the card re-renders as the page settles and each render would
+ * otherwise cause another storage write and another badge update.
+ */
+async function handleYoutubeDetected() {
+  const settings = await getSettings();
+  if (settings.youtubeMode === "allow" || settings.youtubeDetectedAt) {
+    return { ok: true, ignored: true };
+  }
+
+  await saveSettings({ youtubeDetectedAt: Date.now() });
+  await updateBadge();
+  return { ok: true };
+}
+
 // A settings change reaches us from four places at once -- onInstalled,
 // onStartup, storage.onChanged (which onInstalled itself triggers by writing
 // the defaults) and the module-level call at the bottom of this file. Each one
@@ -383,6 +460,9 @@ function syncFromSettings() {
     await applyRulesets(settings);
     await applyCosmeticScript(settings);
     await applyMainWorldScripts(settings);
+    // After the static rulesets: the allow rules outrank them by priority, but
+    // they have to exist before anything loads a YouTube page.
+    await applyYoutubeAllowRules(settings);
     await updateBadge();
   };
 
@@ -474,6 +554,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "rules:get":
       sendResponse(lastRuleReport);
       return false;
+
+    case "youtube:detected":
+      handleYoutubeDetected()
+        .then(sendResponse)
+        .catch((error) => sendResponse({ ok: false, error: String(error) }));
+      return true;
 
     case "settings:set":
       chrome.storage.local

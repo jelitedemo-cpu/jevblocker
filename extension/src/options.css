@@ -112,7 +112,8 @@ h2 {
 }
 
 .field input[type="text"],
-.field input[type="password"] {
+.field input[type="password"],
+.field select {
   width: 100%;
   padding: 8px 10px;
   border-radius: 8px;

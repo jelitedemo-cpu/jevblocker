@@ -340,10 +340,32 @@ is never seeked.
 
 This depends on YouTube's internal field names, so it is an arms race. It is what
 uBlock Origin does, and like uBlock Origin it will occasionally need updating when
-YouTube changes its internals. Unlike the rest of the extension it will not
-degrade silently — it will simply stop removing ads. Turn it off with
-**Skip YouTube ads** in Settings if it ever misbehaves; playback is never at risk,
-only ad removal.
+YouTube changes its internals.
+
+**The failure mode is not "ads come back".** YouTube actively detects ad blocking
+and, when it does, refuses to play the video at all — the player is replaced by an
+"Ad blockers violate YouTube's Terms of Service" card with a **Allow YouTube Ads**
+button. This is a deliberate product decision on their side, not a bug in the
+scriptlets, and no extension reliably wins it for long. Adblock Plus and AdBlock
+both document "allowlist the site" as the fix, because it is the only fix that
+stays fixed.
+
+So YouTube is a **mode**, not a checkbox:
+
+| Setting | What happens |
+| --- | --- |
+| **Block ads (best effort)** | Scriptlets strip the ad fields. Usually works. When YouTube notices, the video will not play. |
+| **Allow YouTube (playback always works)** | No blocking of any kind on `youtube.com`. Ads play; playback is guaranteed. |
+
+"Allow" does three things, because blocking any one of them can trigger detection
+on its own: it drops the two `allowAllRequests` dynamic rules over the network
+layer, unregisters the main-world scriptlets, and skips cosmetic filtering.
+
+When the enforcement card is actually seen, the content script reports it and the
+popup says so plainly, pointing at the setting. That matters because this is the
+one failure a user cannot diagnose: the page is not broken, it is refusing.
+
+Switching modes is the whole fix. There is no build where both are true at once.
 
 Verify it with:
 
