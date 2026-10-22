@@ -33,6 +33,11 @@ export const DEFAULT_SETTINGS = {
   // the mode changes.
   youtubeDetectedAt: 0,
 
+  // True when the extension threw the switch itself because playback was being
+  // refused. The popup says so, and says how to put it back -- a fix applied on
+  // someone's behalf has to be visible, or they learn nothing from it.
+  youtubeAutoRecovered: false,
+
   jevEnabled: false,
   jevApiKey: "",
   jevModel: "jev-latest",

@@ -463,15 +463,49 @@ async function handleCosmeticGet({ host }) {
  * because the card re-renders as the page settles and each render would
  * otherwise cause another storage write and another badge update.
  */
-async function handleYoutubeDetected() {
+/**
+ * YouTube served the "ad blockers violate the Terms of Service" card.
+ *
+ * The user opened a video and got no video. Telling them to go find a setting
+ * is a fix that only works if they come back and read it, so instead the switch
+ * is thrown for them: turn YouTube to "allow", then reload the tab they were
+ * already on. They see a flicker, then the video plays.
+ *
+ * `youtubeAutoRecovered` is what lets the popup say this happened rather than
+ * quietly reporting "YouTube is allowlisted, so ads play there" as though it
+ * had always been that way. Recovering silently would be worse than not
+ * recovering: the user would never learn that ad blocking on YouTube is the
+ * thing that broke playback.
+ *
+ * Already being in "allow" means there is nothing to recover and -- more
+ * importantly -- nothing to reload. Reloading there would loop forever, since
+ * the card is still on screen while the page is being replaced.
+ */
+async function handleYoutubeDetected(sender) {
   const settings = await getSettings();
-  if (settings.youtubeMode === "allow" || settings.youtubeDetectedAt) {
+  if (settings.youtubeMode === "allow") {
     return { ok: true, ignored: true };
   }
 
-  await saveSettings({ youtubeDetectedAt: Date.now() });
+  await saveSettings({
+    youtubeMode: "allow",
+    youtubeDetectedAt: Date.now(),
+    youtubeAutoRecovered: true,
+  });
   await updateBadge();
-  return { ok: true };
+
+  const tabId = sender?.tab?.id;
+  if (typeof tabId === "number") {
+    try {
+      await chrome.tabs.reload(tabId);
+    } catch (error) {
+      // The tab can be gone by now, which is fine -- the setting is saved and
+      // the next load of any YouTube page picks it up.
+      console.warn("[jev] could not reload the YouTube tab", error);
+    }
+  }
+
+  return { ok: true, recovered: true };
 }
 
 // A settings change reaches us from four places at once -- onInstalled,
@@ -599,7 +633,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case "youtube:detected":
-      handleYoutubeDetected()
+      handleYoutubeDetected(sender)
         .then(sendResponse)
         .catch((error) => sendResponse({ ok: false, error: String(error) }));
       return true;

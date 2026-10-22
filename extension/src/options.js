@@ -50,8 +50,10 @@ function collect() {
   for (const key of CHECKBOXES) patch[key] = fields[key].checked;
   patch.youtubeMode = fields.youtubeMode.value;
   // Picking a mode is the user acknowledging the situation, so the "YouTube
-  // blocked playback" notice clears instead of nagging forever.
+  // blocked playback" notice clears instead of nagging forever -- and the
+  // recovery is no longer "automatic", because they have chosen since.
   patch.youtubeDetectedAt = 0;
+  patch.youtubeAutoRecovered = false;
   patch.jevApiKey = fields.jevApiKey.value.trim();
   patch.jevModel = fields.jevModel.value.trim() || "jev-latest";
   patch.jevThreshold = Number(fields.jevThreshold.value);

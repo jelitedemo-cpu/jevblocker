@@ -62,6 +62,11 @@ function isProtectedHost(host = location.hostname) {
   return PROTECTED_HOSTS.some((p) => h === p || h.endsWith(`.${p}`));
 }
 
+// Session-scoped marker for "we already reloaded this tab to clear the YouTube
+// enforcement card". Without it, a card that survives one reload would trigger
+// another reload, and another, for as long as the tab is open.
+const YOUTUBE_RELOAD_FLAG = "jev-youtube-reloaded";
+
   let settings = null;
   let passes = 0;
   let judgedSignatures = new Set();
@@ -411,6 +416,29 @@ function isProtectedHost(host = location.hostname) {
       reported = true;
       observer.disconnect();
       void safeSend({ type: "youtube:detected" });
+
+      // If YouTube is already allowlisted then the setting is not the problem:
+      // this page was loaded before the switch and is still showing the card.
+      // One reload clears it. The sessionStorage flag makes "one" literal -- if
+      // the card survives a reload with blocking already off, then reloading
+      // again would loop forever, and the honest move is to stop and leave the
+      // page alone.
+      if (settings.youtubeMode === "allow") {
+        let alreadyTried = false;
+        try {
+          alreadyTried = sessionStorage.getItem(YOUTUBE_RELOAD_FLAG) === "1";
+        } catch {
+          /* storage can be denied on some pages; treat as "not tried" */
+        }
+        if (!alreadyTried) {
+          try {
+            sessionStorage.setItem(YOUTUBE_RELOAD_FLAG, "1");
+          } catch {
+            /* same */
+          }
+          location.reload();
+        }
+      }
     };
 
     const observer = new MutationObserver(check);

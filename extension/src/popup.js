@@ -98,8 +98,18 @@ async function render() {
   const youtubeBlocked =
     settings.youtubeMode !== "allow" && Number(settings.youtubeDetectedAt) > 0;
 
+  // The extension threw the switch itself after seeing the enforcement card.
+  // Saying so matters: applied silently, it would look like YouTube has always
+  // had ads here, and the user would never connect the two.
+  const youtubeRecovered =
+    settings.youtubeMode === "allow" && Boolean(settings.youtubeAutoRecovered);
+
   if (!settings.enabled) {
     el.status.textContent = "Protection is off.";
+  } else if (youtubeRecovered) {
+    el.status.textContent =
+      "YouTube refused to play video, so ad blocking is off for YouTube. " +
+      "Switch it back under Settings → YouTube.";
   } else if (youtubeBlocked) {
     el.status.textContent =
       "YouTube is refusing to play video because it detected ad blocking. " +

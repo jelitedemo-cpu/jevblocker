@@ -846,8 +846,11 @@ async function evaluateInNewPage(cdp, url, expression, hrefFragment, accept = ()
         if (String(candidate.href || "").includes(hrefFragment) && accept(candidate)) {
           report = candidate;
         }
+      } else if (process.env.JEV_DEBUG_STATE && result) {
+        console.log("  debug:", JSON.stringify(result).slice(0, 300));
       }
-    } catch {
+    } catch (error) {
+      if (process.env.JEV_DEBUG_STATE) console.log("  debug throw:", error.message.slice(0, 200));
       /* still navigating, or the page has not rendered yet */
     }
     if (!report) await sleep(250);
@@ -863,11 +866,19 @@ async function evaluateInNewPage(cdp, url, expression, hrefFragment, accept = ()
 }
 
 async function verifyOptionsPage(cdp, extensionId) {
+  // Waiting for `href` alone is not enough: during navigation the URL commits
+  // before the document is parsed, so a reading taken in that window sees the
+  // right address and an empty body -- every control reported missing. Poll
+  // until the controls are there, then take whatever is left after four
+  // seconds, because a control that is genuinely gone should be reported, not
+  // waited out.
+  const started = Date.now();
   const report = await evaluateInNewPage(
     cdp,
     `chrome-extension://${extensionId}/src/options.html`,
     OPTIONS_EXPRESSION,
-    "options.html"
+    "options.html",
+    (candidate) => candidate.missing.length === 0 || Date.now() - started > 4000
   );
 
   if (!report) {
@@ -902,6 +913,113 @@ async function verifyOptionsPage(cdp, extensionId) {
  * Going through the popup is both the only route and the better test, because it
  * exercises the same path the user sees.
  */
+/**
+ * When YouTube serves the enforcement card the extension is supposed to throw
+ * the switch itself rather than wait for someone to find a setting. This drives
+ * that path the way the content script does -- from a page context, since a
+ * service worker cannot message itself.
+ *
+ * The second report is the interesting one: recovery must be inert once the
+ * mode is already "allow", or the tab reload it triggers would loop forever.
+ */
+async function evalOnTarget(cdp, targetId, expression) {
+  const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+  const { result } = await cdp.send(
+    "Runtime.evaluate",
+    { expression, awaitPromise: true, returnByValue: true },
+    sessionId
+  );
+  return result;
+}
+
+async function readSettings(cdp, targetId) {
+  const result = await evalOnTarget(
+    cdp,
+    targetId,
+    `(async () => JSON.stringify((await chrome.storage.local.get("settings")).settings || null))()`
+  );
+  return result?.value ? JSON.parse(result.value) : null;
+}
+
+async function writeSettings(cdp, targetId, value) {
+  const body =
+    value === null
+      ? `await chrome.storage.local.remove("settings");`
+      : `await chrome.storage.local.set({ settings: ${JSON.stringify(value)} });`;
+  await evalOnTarget(cdp, targetId, `(async () => { ${body} })()`);
+}
+
+async function verifyYoutubeRecovery(cdp, workerTargetId, extensionId) {
+  const popupUrl = `chrome-extension://${extensionId}/src/popup.html`;
+  const backup = await readSettings(cdp, workerTargetId);
+
+  try {
+    await writeSettings(cdp, workerTargetId, {
+      ...(backup || {}),
+      enabled: true,
+      youtubeMode: "block",
+      youtubeDetectedAt: 0,
+      youtubeAutoRecovered: false,
+    });
+    await sleep(1000);
+
+    // Fire the report from a page, the way the content script does -- a service
+    // worker never receives its own sendMessage. The tab is expected to navigate
+    // out from under us, because that reload IS the fix working, so the result
+    // is read from storage instead of from the page.
+    await evaluateInNewPage(
+      cdp,
+      popupUrl,
+      `(() => {
+        void chrome.runtime.sendMessage({ type: "youtube:detected" });
+        return JSON.stringify({ href: location.href, fired: true });
+      })()`,
+      "popup.html"
+    );
+
+    let after = null;
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      after = await readSettings(cdp, workerTargetId);
+      if (after && after.youtubeMode === "allow" && after.youtubeAutoRecovered) break;
+      await sleep(250);
+    }
+
+    const recovered = Boolean(
+      after &&
+        after.youtubeMode === "allow" &&
+        after.youtubeAutoRecovered &&
+        Number(after.youtubeDetectedAt) > 0
+    );
+    console.log(
+      `  ${recovered ? "ok  " : "FAIL"} seeing the card switches YouTube to allow by itself` +
+        (recovered ? "" : `  (mode=${after?.youtubeMode}, flag=${after?.youtubeAutoRecovered})`)
+    );
+
+    // A second report must be inert. This is the difference between recovering
+    // once and reloading the tab forever: the card is still on screen while the
+    // page is being replaced, so a handler that always acts would loop.
+    const second = await evaluateInNewPage(
+      cdp,
+      popupUrl,
+      `(async () => {
+        const reply = await chrome.runtime.sendMessage({ type: "youtube:detected" });
+        return JSON.stringify({ href: location.href, ignored: Boolean(reply && reply.ignored) });
+      })()`,
+      "popup.html"
+    );
+    const idempotent = Boolean(second && second.ignored);
+    console.log(
+      `  ${idempotent ? "ok  " : "FAIL"} a second report is ignored, so the reload cannot loop`
+    );
+
+    return recovered && idempotent;
+  } finally {
+    await writeSettings(cdp, workerTargetId, backup);
+    await sleep(900);
+  }
+}
+
 const POPUP_EXPRESSION = `(async () => {
   const ids = [
     "enabled", "status", "statBlocked", "statHidden", "statJev",
@@ -923,23 +1041,42 @@ const POPUP_EXPRESSION = `(async () => {
     truth = { error: String(error) };
   }
 
+  const line = /^Applied: YouTube (block|allow) — (\\d+) allow-rule\\(s\\), (\\d+) page script\\(s\\)/.exec(
+    text
+  );
+  const consistent = Boolean(
+    line &&
+      truth &&
+      !truth.error &&
+      Number(line[2]) === truth.allowRules &&
+      Number(line[3]) === truth.mainWorld
+  );
+
   return JSON.stringify({
     href: location.href,
     missing,
     diag: text,
     truth,
+    consistent,
     ready: text.startsWith("Applied:"),
   });
 })()`;
 
 async function verifyPopupPage(cdp, extensionId) {
+  // A reading taken while the settings sync is still running shows a mode from
+  // storage next to rule counts from Chrome, which disagree for a few hundred
+  // milliseconds. Prefer a reading where they agree; after four seconds take
+  // whatever is there, because a lasting disagreement is the bug worth reporting
+  // rather than something to wait out.
+  const started = Date.now();
   const report = await evaluateInNewPage(
     cdp,
     `chrome-extension://${extensionId}/src/popup.html`,
     POPUP_EXPRESSION,
     "popup.html",
-    // render() is async, so an empty #diag means "not yet", not "broken".
-    (candidate) => candidate.ready || candidate.missing.length > 0
+    (candidate) =>
+      candidate.missing.length > 0 ||
+      (candidate.ready && (candidate.consistent || Date.now() - started > 4000))
   );
 
   if (!report) {
@@ -1091,6 +1228,12 @@ async function main() {
     console.log("\nYouTube allowlist:\n");
     const youtubeOk = await verifyYoutubeAllowlist(cdp, worker.targetId);
 
+    console.log("\nYouTube recovery (the card appears):\n");
+    const recoveryOk = await verifyYoutubeRecovery(cdp, worker.targetId, loaded.id);
+    // The recovery check writes settings twice; let the sync chain settle so the
+    // popup below is not measured mid-flight.
+    await sleep(1200);
+
     console.log("\nOptions page:\n");
     const optionsOk = await verifyOptionsPage(cdp, loaded.id);
 
@@ -1114,6 +1257,7 @@ async function main() {
       rulesOk &&
       raceOk &&
       youtubeOk &&
+      recoveryOk &&
       optionsOk &&
       popupOk &&
       domainOk &&

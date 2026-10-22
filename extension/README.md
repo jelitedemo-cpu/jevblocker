@@ -374,16 +374,24 @@ So YouTube is a **mode**, not a checkbox:
 on its own: it drops the two `allowAllRequests` dynamic rules over the network
 layer, unregisters the main-world scriptlets, and skips cosmetic filtering.
 
-When the enforcement card is actually seen, the content script reports it and the
-popup says so plainly, pointing at the setting. That matters because this is the
-one failure a user cannot diagnose: the page is not broken, it is refusing.
+When the enforcement card is actually seen, the content script reports it. The
+extension then **switches YouTube to Allow itself and reloads the tab** — the
+card is not something a user can diagnose, because the page is not broken, it is
+refusing, so being told to go find a setting only helps if they come back and
+read it. The popup says the switch happened and where to undo it; recovering
+silently would be worse than not recovering, because nobody would ever connect
+"ad blocking on YouTube" to "video stopped playing".
+
+Reporting twice is deliberately inert. The card stays on screen while the page is
+being replaced, so a handler that acted every time would reload the tab forever.
 
 Switching modes is the whole fix. There is no build where both are true at once.
 
 Verify it with:
 
 ```
-node tools/check-youtube.mjs
+node tools/check-youtube.mjs        # offline
+node tools/check-youtube-live.mjs   # live, both modes
 ```
 
 That test serves a fake player response over HTTPS on a real `youtube.com` origin
