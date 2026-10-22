@@ -9,6 +9,7 @@ const el = {
   judge: document.getElementById("judge"),
   message: document.getElementById("message"),
   rules: document.getElementById("rules"),
+  diag: document.getElementById("diag"),
   openOptions: document.getElementById("openOptions"),
   resetStats: document.getElementById("resetStats"),
 };
@@ -44,6 +45,36 @@ async function renderRules() {
     ? `${formatted} rules active — ${report.skipped.length} ruleset(s) did not fit ` +
       `Chrome's budget and are off.`
     : `${formatted} rules active`;
+}
+
+/**
+ * One line saying what Chrome has actually applied. When something on YouTube
+ * misbehaves, this is the difference between "our settings are wrong" and "the
+ * loaded copy is older than the settings" -- and there is no other place in the
+ * UI where that is visible.
+ */
+async function renderDiagnostics() {
+  let state;
+  try {
+    state = await chrome.runtime.sendMessage({ type: "state:get" });
+  } catch {
+    state = null;
+  }
+
+  if (!state || state.error) {
+    el.diag.textContent = "Could not read what Chrome has applied.";
+    return;
+  }
+
+  const scripts = state.mainWorldScripts;
+  const rules = state.allowRules;
+  const consistent =
+    state.youtubeMode === "allow" ? rules === 2 && scripts === 0 : rules === 0 && scripts > 0;
+
+  el.diag.textContent =
+    `Applied: YouTube ${state.youtubeMode} — ${rules} allow-rule(s), ` +
+    `${scripts} page script(s)` +
+    (consistent ? "" : " — not in sync; reload the extension");
 }
 
 async function render() {
@@ -83,6 +114,7 @@ async function render() {
 
   el.judge.disabled = !settings.jevEnabled;
   await renderRules();
+  await renderDiagnostics();
 }
 
 el.enabled.addEventListener("change", async () => {

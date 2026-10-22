@@ -63,6 +63,15 @@ h1 {
   color: #b45309;
 }
 
+/* The applied-state line is diagnostic, not a headline: readable, but quieter
+   than the status sentence above it. */
+.rules.diag {
+  margin-top: -6px;
+  font-size: 10px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

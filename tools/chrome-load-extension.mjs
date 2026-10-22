@@ -819,15 +819,17 @@ const OPTIONS_EXPRESSION = `(() => {
   });
 })()`;
 
-async function verifyOptionsPage(cdp, extensionId) {
-  const { targetId } = await cdp.send("Target.createTarget", {
-    url: `chrome-extension://${extensionId}/src/options.html`,
-  });
+/**
+ * Opens `url` in a new tab and evaluates `expression` in it once it is really
+ * there. Returns null when the page never loaded.
+ *
+ * `createTarget` returns while the target is still on about:blank, so a report
+ * is only accepted once the URL contains `hrefFragment` -- otherwise the empty
+ * document is measured and every control looks missing.
+ */
+async function evaluateInNewPage(cdp, url, expression, hrefFragment, accept = () => true) {
+  const { targetId } = await cdp.send("Target.createTarget", { url });
 
-  // The page has to finish parsing before the elements exist. createTarget
-  // returns while the target is still on about:blank, so a report is only
-  // accepted once the URL is the options page -- otherwise the empty document
-  // is measured and every control looks missing.
   let report = null;
   const deadline = Date.now() + 8000;
   while (Date.now() < deadline && !report) {
@@ -835,15 +837,18 @@ async function verifyOptionsPage(cdp, extensionId) {
       const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
       const { result } = await cdp.send(
         "Runtime.evaluate",
-        { expression: OPTIONS_EXPRESSION, returnByValue: true },
+        { expression, awaitPromise: true, returnByValue: true },
         sessionId
       );
       if (result?.value) {
-        const candidate = JSON.parse(result.value);
-        if (String(candidate.href || "").includes("options.html")) report = candidate;
+        const candidate =
+          typeof result.value === "string" ? JSON.parse(result.value) : result.value;
+        if (String(candidate.href || "").includes(hrefFragment) && accept(candidate)) {
+          report = candidate;
+        }
       }
     } catch {
-      /* still navigating */
+      /* still navigating, or the page has not rendered yet */
     }
     if (!report) await sleep(250);
   }
@@ -853,6 +858,17 @@ async function verifyOptionsPage(cdp, extensionId) {
   } catch {
     /* already gone */
   }
+
+  return report;
+}
+
+async function verifyOptionsPage(cdp, extensionId) {
+  const report = await evaluateInNewPage(
+    cdp,
+    `chrome-extension://${extensionId}/src/options.html`,
+    OPTIONS_EXPRESSION,
+    "options.html"
+  );
 
   if (!report) {
     console.log("  FAIL options page did not load");
@@ -873,6 +889,95 @@ async function verifyOptionsPage(cdp, extensionId) {
   );
 
   return controlsOk && selectOk;
+}
+
+/**
+ * The popup renders its own "Applied:" line by asking the background what Chrome
+ * has installed. That line is only trustworthy if the answer matches reality --
+ * otherwise it sends people hunting the wrong problem -- so read the rendered
+ * text and compare it with Chrome's actual state.
+ *
+ * The background cannot be asked directly: a service worker does not receive
+ * its own `runtime.sendMessage`, so evaluating `state:get` there hangs forever.
+ * Going through the popup is both the only route and the better test, because it
+ * exercises the same path the user sees.
+ */
+const POPUP_EXPRESSION = `(async () => {
+  const ids = [
+    "enabled", "status", "statBlocked", "statHidden", "statJev",
+    "judge", "message", "rules", "diag", "openOptions", "resetStats",
+  ];
+  const missing = ids.filter((id) => !document.getElementById(id));
+  const diag = document.getElementById("diag");
+  const text = diag ? diag.textContent.trim() : "";
+
+  let truth = null;
+  try {
+    const rules = await chrome.declarativeNetRequest.getDynamicRules();
+    const scripts = await chrome.scripting.getRegisteredContentScripts();
+    truth = {
+      allowRules: rules.filter((r) => r.id === 9001 || r.id === 9002).length,
+      mainWorld: scripts.filter((s) => s.id.startsWith("jev-mainworld-")).length,
+    };
+  } catch (error) {
+    truth = { error: String(error) };
+  }
+
+  return JSON.stringify({
+    href: location.href,
+    missing,
+    diag: text,
+    truth,
+    ready: text.startsWith("Applied:"),
+  });
+})()`;
+
+async function verifyPopupPage(cdp, extensionId) {
+  const report = await evaluateInNewPage(
+    cdp,
+    `chrome-extension://${extensionId}/src/popup.html`,
+    POPUP_EXPRESSION,
+    "popup.html",
+    // render() is async, so an empty #diag means "not yet", not "broken".
+    (candidate) => candidate.ready || candidate.missing.length > 0
+  );
+
+  if (!report) {
+    console.log("  FAIL popup did not load");
+    return false;
+  }
+
+  const controlsOk = report.missing.length === 0;
+  console.log(
+    `  ${controlsOk ? "ok  " : "FAIL"} every control popup.js looks up exists` +
+      (controlsOk ? "" : `  (missing: ${report.missing.join(", ")})`)
+  );
+
+  const appliedOk = /^Applied: YouTube (block|allow) — \d+ allow-rule\(s\), \d+ page script\(s\)$/.test(
+    report.diag
+  );
+  console.log(
+    `  ${appliedOk ? "ok  " : "FAIL"} the applied-state line reports a real mode` +
+      (appliedOk ? `  (${report.diag})` : `  (got: ${report.diag || "nothing"})`)
+  );
+
+  // The line is a claim about Chrome's state. Verify the claim.
+  const reported = /^Applied: YouTube (block|allow) — (\d+) allow-rule\(s\), (\d+) page script\(s\)/.exec(
+    report.diag
+  );
+  const matches =
+    reported && report.truth && !report.truth.error
+      ? Number(reported[2]) === report.truth.allowRules &&
+        Number(reported[3]) === report.truth.mainWorld
+      : false;
+  console.log(
+    `  ${matches ? "ok  " : "FAIL"} the applied-state line matches Chrome` +
+      (matches
+        ? `  (${report.truth.allowRules} allow-rule(s), ${report.truth.mainWorld} script(s))`
+        : `  (Chrome has ${report.truth?.allowRules}/${report.truth?.mainWorld})`)
+  );
+
+  return controlsOk && appliedOk && matches;
 }
 
 async function main() {
@@ -989,6 +1094,9 @@ async function main() {
     console.log("\nOptions page:\n");
     const optionsOk = await verifyOptionsPage(cdp, loaded.id);
 
+    console.log("\nPopup:\n");
+    const popupOk = await verifyPopupPage(cdp, loaded.id);
+
     console.log("\nCosmetic filtering (site-specific rules):\n");
     const domainOk = probe.domain
       ? await runCosmeticDomainCheck(cdp, probe.domain, probe.domainSelector)
@@ -1002,7 +1110,14 @@ async function main() {
     const e2eOk = await runEndToEnd(cdp, probe);
 
     const passed =
-      accountingOk && rulesOk && raceOk && youtubeOk && optionsOk && domainOk && e2eOk;
+      accountingOk &&
+      rulesOk &&
+      raceOk &&
+      youtubeOk &&
+      optionsOk &&
+      popupOk &&
+      domainOk &&
+      e2eOk;
     if (!passed) process.exitCode = 1;
 
     if (captureLog && logLines.length) {

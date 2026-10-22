@@ -367,6 +367,43 @@ async function applyYoutubeAllowRules(settings) {
   }
 }
 
+// ---------------------------------------------------------------- applied state
+
+/**
+ * Reads what Chrome actually has installed, not what the settings say should be
+ * installed. The two diverge whenever a sync failed, and -- more to the point --
+ * whenever the loaded copy of the extension predates the settings shape on disk.
+ * That is the state a user is in after an update they have not reloaded, and it
+ * looks identical to "the fix did not work" unless something reports it.
+ */
+async function readAppliedState() {
+  const settings = await getSettings();
+  const state = {
+    youtubeMode: settings.youtubeMode ?? "unknown",
+    allowRules: 0,
+    mainWorldScripts: 0,
+    cosmeticRegistered: false,
+    error: null,
+  };
+
+  try {
+    const rules = await chrome.declarativeNetRequest.getDynamicRules();
+    state.allowRules = rules.filter((rule) => YOUTUBE_ALLOW_RULE_IDS.includes(rule.id)).length;
+  } catch (error) {
+    state.error = String(error);
+  }
+
+  try {
+    const scripts = await chrome.scripting.getRegisteredContentScripts();
+    state.mainWorldScripts = scripts.filter((s) => s.id.startsWith(MAIN_WORLD_PREFIX)).length;
+    state.cosmeticRegistered = scripts.some((s) => s.id === COSMETIC_SCRIPT_ID);
+  } catch (error) {
+    state.error = String(error);
+  }
+
+  return state;
+}
+
 // ---------------------------------------------------------------- cosmetic lookup
 
 let cosmeticDomains = null;
@@ -554,6 +591,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case "rules:get":
       sendResponse(lastRuleReport);
       return false;
+
+    case "state:get":
+      readAppliedState()
+        .then(sendResponse)
+        .catch((error) => sendResponse({ error: String(error) }));
+      return true;
 
     case "youtube:detected":
       handleYoutubeDetected()

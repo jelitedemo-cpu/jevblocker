@@ -337,23 +337,48 @@ async function main() {
     const allow = results.find((r) => r.mode === "allow")?.probe;
     const block = results.find((r) => r.mode === "block")?.probe;
 
-    if (allow && !allow.botCheck && !allow.consent) {
+    const blockUsable = block && !block.botCheck && !block.consent;
+    const allowUsable = allow && !allow.botCheck && !allow.consent;
+
+    // This check is only evidence if blocking mode actually got caught. When it
+    // does not, the allow run cannot fail no matter what the extension does --
+    // there is no card to suppress -- and reporting PASS would be a test that
+    // passes on broken code. That is exactly what the first version did.
+    if (blockUsable && !block.enforcement) {
       console.log(
-        allow.enforcement
-          ? "FAIL — even with YouTube allowed, the enforcement card appeared. Detection is\n" +
-            "       not coming from this extension."
-          : "PASS — with YouTube allowed, no enforcement card and the player loaded."
+        "INCONCLUSIVE — YouTube did not detect blocking mode on this video, so the\n" +
+          "               allow run proves nothing: there was no card to suppress.\n" +
+          "               Pass a monetised video id to make the comparison real:\n" +
+          "               node tools/check-youtube-live.mjs <videoId>"
       );
-      if (allow.enforcement) process.exitCode = 1;
+      if (allowUsable && allow.enforcement) process.exitCode = 1;
+      else process.exitCode = 2;
+      return;
     }
 
-    if (block && !block.botCheck && !block.consent) {
+    if (blockUsable && block.enforcement) {
       console.log(
-        block.enforcement
-          ? "NOTE — blocking mode is currently detected by YouTube. That is the expected\n" +
-            "       state of the arms race, and the reason the setting exists."
-          : "NOTE — blocking mode is currently NOT detected on this video."
+        "NOTE — blocking mode is detected on this video. That is the expected state\n" +
+          "       of the arms race, and the reason the setting exists."
       );
+      if (allowUsable) {
+        console.log(
+          allow.enforcement
+            ? "FAIL — the card survived the switch to allow. Our allow path is incomplete;\n" +
+                "       check that both dynamic rules exist AND both scripts are gone."
+            : "PASS — blocking was detected, and switching to allow cleared it."
+        );
+        process.exitCode = allow.enforcement ? 1 : 0;
+      }
+      return;
+    }
+
+    if (allowUsable && allow.enforcement) {
+      console.log(
+        "FAIL — even with YouTube allowed, the enforcement card appeared. Detection is\n" +
+          "       not coming from this extension."
+      );
+      process.exitCode = 1;
     }
   } finally {
     cdp?.close();
